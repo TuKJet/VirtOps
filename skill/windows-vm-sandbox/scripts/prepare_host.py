@@ -132,6 +132,105 @@ def host_facts(path):
     }
 
 
+def guard_root_free_threshold(root):
+    """Return the root-free threshold the installed capacity guard actually enforces.
+
+    Each instance installs its own capacity guard, and that guard pauses a
+    running VM when host root free space falls below its threshold.  The value
+    that matters is the one compiled into the instance's own vmctl.py, because
+    an operator may have lowered it with configure after the profile was
+    written.  Returns None when the installed guard cannot be read.
+    """
+    path=Path(root)/'scripts/lib/vmctl.py'
+    try:
+        if path.is_symlink() or not path.is_file(): return None
+        text=path.read_text(encoding='utf-8',errors='replace')
+    except OSError:
+        return None
+    match=re.search(r'^START_ROOT_FREE_MIN\s*=\s*([0-9_]+)(\s*\*\s*GIB)?',text,re.M)
+    if not match: return None
+    value=int(match.group(1).replace('_',''))
+    return value*GIB if match.group(2) else value
+
+
+def recorded_root_free_threshold(root):
+    """Return the root-free threshold recorded in the instance's own profile.
+
+    Used when the installed guard cannot be read.  It can be stale when the
+    threshold was lowered with configure, so it is only a fallback.
+    """
+    path=Path(root)/'instance.json'
+    try:
+        if path.is_symlink() or not path.is_file(): return None
+        value=json.loads(path.read_text(encoding='utf-8'))
+    except (OSError,ValueError,json.JSONDecodeError):
+        return None
+    recorded=(value.get('limits') or {}).get('root_free_gib')
+    return recorded*GIB if isinstance(recorded,int) else None
+
+
+def capacity_plan(data, *, root_free, same_filesystem=True, published_image_gib=None):
+    """Project the capacity impact of one more instance and flag co-tenants.
+
+    Every instance installs a capacity guard that pauses the VM when host root
+    free space drops below its own root_free threshold.  The thresholds are
+    per instance but they all watch the same host filesystem, so allocating
+    another fully preallocated store can push a neighbour below its threshold
+    and pause somebody else's running VM.  This plan is read-only: it reports
+    what would happen and never changes another instance's configuration.
+    """
+    allocation=data['resources']['storage_gib']*GIB
+    projected=root_free-allocation if same_filesystem else root_free
+    existing=[];at_risk=[]
+    for _,item in _registry._records(Path(data['host_root'])/'registry'):
+        if item['name']==data['name']: continue
+        threshold=guard_root_free_threshold(item.get('root',''))
+        source='installed-guard'
+        if threshold is None:
+            threshold=recorded_root_free_threshold(item.get('root',''))
+            source='instance-profile'
+        if threshold is None:
+            recorded=(item.get('limits') or {}).get('root_free_gib')
+            threshold=recorded*GIB if isinstance(recorded,int) else None
+            source='registry' if threshold is not None else 'unknown'
+        entry={'name':item['name'],
+               'storage_gib':(item.get('resources') or {}).get('storage_gib'),
+               'root_free_threshold_gib':None if threshold is None else round(threshold/GIB,2),
+               'threshold_source':source}
+        entry['at_risk']=bool(threshold is not None and same_filesystem and projected<threshold)
+        if entry['at_risk']: at_risk.append(item['name'])
+        existing.append(entry)
+    return {'root_free_gib':round(root_free/GIB,2),
+            'store_allocation_gib':data['resources']['storage_gib'],
+            'projected_root_free_gib':round(projected/GIB,2),
+            'own_reserve_required_gib':data['limits']['root_free_gib'],
+            'projection_scope':'same-filesystem' if same_filesystem else 'separate-filesystem',
+            'existing_instances':existing,
+            'instances_at_risk':at_risk,
+            'chain':{'store_allocation_gib':data['resources']['storage_gib'],
+                     'published_image_gib':published_image_gib,
+                     'order':['prepare builder','capture image','destroy builder','create instance'],
+                     'note':'the bounded store is fully preallocated at the storage stage; a builder store is released by destroying the builder after capture, so capture and destroy before creating instances'}}
+
+
+def capacity_conflict(plan):
+    """Return an operator-facing message when this allocation would pause a neighbour.
+
+    Returns None when no existing instance is put at risk.  The message names
+    the affected instances and their thresholds so the operator can decide,
+    instead of letting a capacity guard silently pause somebody else's VM.
+    """
+    at_risk=plan.get('instances_at_risk') or []
+    if not at_risk: return None
+    thresholds=', '.join('%s (%s GiB)'%(entry['name'],entry['root_free_threshold_gib'])
+                         for entry in plan.get('existing_instances',[]) if entry.get('name') in at_risk)
+    return ('NEEDS_USER_INPUT: allocating %s GiB leaves %s GiB free on the host root filesystem, below the '
+            'capacity-guard threshold of existing instance(s) %s; their guard would pause them. Free host space, or '
+            'lower their root_free_gib with configure after their owner agrees, before running this stage. '
+            'Never pause a neighbour automatically.'%(
+                plan.get('store_allocation_gib'),plan.get('projected_root_free_gib'),thresholds))
+
+
 def verify_virtio(path):
     with tempfile.TemporaryDirectory(prefix='virtops-virtio-') as directory:
         run(['mount','-o','loop,ro,nodev,nosuid,noexec',path,directory])
@@ -176,6 +275,14 @@ def preflight(data):
     stat = os.statvfs(ancestor); free = stat.f_bavail * stat.f_frsize
     data['host_facts'] = host_facts(ancestor)
     if free < (data['resources']['storage_gib'] + data['limits']['root_free_gib']) * GIB: raise RuntimeError('Insufficient space on the instance-root filesystem for a fully allocated store and approved host reserve')
+    # The installed capacity guards watch the host root filesystem, so the
+    # co-tenant projection is only meaningful when the instance root lives on
+    # that same filesystem.
+    try:
+        root_free=os.statvfs('/').f_bavail*os.statvfs('/').f_frsize
+        same_filesystem=os.stat(ancestor).st_dev==os.stat('/').st_dev
+    except OSError:
+        root_free=free;same_filesystem=True
     from_base = data.get('image', {}).get('kind') == 'base'
     media_keys = ('virtio_iso',) if from_base else ('windows_iso', 'virtio_iso')
     if from_base and not shutil.which('ntfscat'):
@@ -216,6 +323,18 @@ def preflight(data):
         data['image_verified'] = iso_image(data)
     verify_virtio(data['media']['virtio_iso'])
     data['media_verified']={key:media_info(data['media'][key]) for key in media_keys}
+    published_image_gib=None
+    if from_base:
+        try:
+            disk=Path(data['image']['manifest']).parent/data['image_verified']['disk']
+            published_image_gib=round(disk.stat().st_size/GIB,2)
+        except OSError:
+            published_image_gib=None
+    data['capacity_plan']=capacity_plan(data,root_free=root_free,same_filesystem=same_filesystem,
+                                         published_image_gib=published_image_gib)
+    if data['capacity_plan']['instances_at_risk']:
+        conflict=capacity_conflict(data['capacity_plan'])
+        if conflict: raise RuntimeError(conflict)
     return data
 
 
@@ -496,7 +615,7 @@ def main():
     if args.stage=='check' or args.stage=='storage':
         data=preflight(data)
         if args.stage=='check' or not args.apply:
-            print(json.dumps({'status':'plan_ready','name':data['name'],'resources':data['resources'],'gpu':data['gpu_verified'],'image':data['image_verified'],'media':data['media_verified'],'host_facts':data['host_facts'],'root':data['root'],'next':'storage --apply within the approved deployment plan'},indent=2));return 0
+            print(json.dumps({'status':'plan_ready','name':data['name'],'resources':data['resources'],'gpu':data['gpu_verified'],'image':data['image_verified'],'media':data['media_verified'],'host_facts':data['host_facts'],'capacity_plan':data['capacity_plan'],'root':data['root'],'next':'storage --apply within the approved deployment plan'},indent=2));return 0
         reserve_registry(data)
         install_host_catalog(data)
         storage(data)

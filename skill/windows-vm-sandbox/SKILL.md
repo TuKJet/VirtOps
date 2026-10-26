@@ -13,6 +13,7 @@ Agent 负责在本 Skill 的抽象层内执行；复用自带命令，不在用�
 |---|---|---|
 | 从基础镜像开一台或几台 VM、删除后重开 | [基础镜像与实例](references/images-instances.md) | `instance.py create/rebuild`、`destroy.py` |
 | 制作一次可复用系统镜像 | [基础镜像与实例](references/images-instances.md) | `template.py generalize/capture/inspect` |
+| 想知道某一步为什么停、停了怎么续作、峰值容量怎么算 | [实例生命周期](references/instance-lifecycle.md) | `instance.py create --resume`、`prepare_host.py --stage check` 的 `capacity_plan` |
 | 首次准备 Linux 宿主或专用 Windows 构建 VM | [初始化](references/initialize.md) | `prepare_host.py`，仅构建 VM 使用 ISO 安装 |
 | 调整已有 VM 的 CPU/内存、保留系统改用户密码 | [维护](references/configure.md) | `configure.py`、`account.py` |
 | 查看、启停、日志、查询全部 VM | [日常管理](references/operate.md) | `host.py`、`status.sh --all` |

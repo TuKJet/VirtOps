@@ -55,6 +55,8 @@ python3 scripts/host.py recreate --profile PROFILE.json
 
 `stop` 请求 guest 正常关机并等待最多 120 秒；超时只暂停并报告，不强制断电，以免损坏 C/D。低内存运行中只记录告警，不暂停 VM，因为暂停不会释放 QEMU RSS。发生宿主 OOM 时先查 `status`、内核/libvirt 日志和资源消耗，不能把“剩余内存低”误当成 VM 自身超限。
 
+磁盘方向相反：宿主根盘余量低于本实例的 `root_free_gib` 阈值时，容量守卫会**暂停**该实例；网络或存储边界失效同样会暂停。由于所有实例的阈值都盯着同一个根盘，在同一宿主上新分配 store 可能把别的实例压到阈值以下并把它暂停。分配前用 `prepare_host --stage check` 的 `capacity_plan` 或 `status --all` 核对；发现他人实例被暂停时，先腾出空间，或与 owner 确认后用 `configure` 下调其 `root_free_gib`，不要为了新实例擅自改别人的阈值，也不要自动 resume 一台正被别人使用的实例。
+
 多人使用前结合 `status --all`、`inspect` 与单实例 `status`：目录视图看所有登记 VM 及标签，inspect 看 UUID、guest RAM/vCPU、marker，status 看状态、cgroup 上限/CPU、store、root/vol 余量和 guard。Windows listener/认证另用 guest 工具验证；NAT 发布端口通常不在宿主 ss 列表中。启动任意新 VM 前还需做同宿主总预算检查；各 VM 的上限不是物理内存预留，也不能替代宿主全局 OOM admission。
 
 ## 日志和网络计数

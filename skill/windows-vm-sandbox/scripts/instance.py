@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 import uuid
@@ -27,6 +28,31 @@ def save(path, value):
 def module(path, name):
     path=trusted(path);spec=importlib.util.spec_from_file_location(name,path)
     value=importlib.util.module_from_spec(spec);sys.modules[name]=value;spec.loader.exec_module(value);return value
+
+
+class Blocked(RuntimeError):
+    """A stage stop that still owns a resumable journal.
+
+    A blocked create is not a failed create: the disk, network and TPM state
+    of the instance is preserved and the remaining stages continue from the
+    journal.  The journal path, the last completed stage and the current
+    domain state travel with the error so an operator can resume instead of
+    building a second instance.
+    """
+    def __init__(self, message, *, journal=None, stage=None, target=None):
+        super().__init__(message)
+        self.journal=str(journal) if journal else None
+        self.stage=stage
+        self.target=target
+
+
+def domstate(name):
+    """Return the libvirt power state of a domain, or None when it is not defined."""
+    if not name: return None
+    result=subprocess.run(['virsh','--readonly','-c','qemu:///system','domstate',name],
+                          text=True,capture_output=True)
+    if result.returncode: return None
+    return result.stdout.strip() or None
 
 
 def ready(data, timeout):
@@ -69,7 +95,8 @@ def create(data, *, apply=False, resume=None, timeout=900):
         checked=prepare.preflight(copy.deepcopy(data))
         return {'status':'ready','target':data['name'],'source_image':checked['image_verified']['image_id'],
                 'resources':checked['resources'],'account':data['windows']['admin_user'],
-                'credentials_mode':data['credentials']['mode'],'next':'create --apply'}
+                'credentials_mode':data['credentials']['mode'],'capacity_plan':checked.get('capacity_plan'),
+                'next':'create --apply'}
     if resume:
         journal=trusted(resume);state=json.loads(journal.read_text())
         if state.get('action')!='create' or any(state['profile'].get(k)!=data.get(k) for k in ('name','uuid','root','windows','network','image','resources','credentials','limits')):
@@ -86,22 +113,29 @@ def create(data, *, apply=False, resume=None, timeout=900):
         state['stage']='storage_ready';state['profile']=current;save(journal,state)
     def advance(stage):
         state['stage']=stage;save(journal,state)
-    stage=state['stage']
-    if stage=='storage_ready':prepare.seed(current);advance('seed_ready');stage='seed_ready'
-    if stage=='seed_ready':prepare.activate(current);advance('booting');stage='booting'
-    if stage=='booting':
-        state['evidence']['guest']=ready(current,timeout)
-        state['evidence']['winrm']=authenticate(current)
-        advance('authenticated');stage='authenticated'
-    if stage=='authenticated':prepare.finish(current);advance('finishing');stage='finishing'
-    if stage=='finishing':
-        # finish deliberately removes the original provisioning marker. Validate
-        # real services/resources/identity plus authenticated execution again.
-        state['evidence']['final_winrm']=authenticate_after_restart(current,timeout)
-        pin=state['evidence']['final_winrm']['thumbprint']
-        config=Path(current['root'])/'instance.json';saved=json.loads(config.read_text());saved['winrm_thumbprint']=pin
-        save(config,saved);current['winrm_thumbprint']=pin
-        state['profile']=current;advance('running')
+    try:
+        stage=state['stage']
+        if stage=='storage_ready':prepare.seed(current);advance('seed_ready');stage='seed_ready'
+        if stage=='seed_ready':prepare.activate(current);advance('booting');stage='booting'
+        if stage=='booting':
+            state['evidence']['guest']=ready(current,timeout)
+            state['evidence']['winrm']=authenticate(current)
+            advance('authenticated');stage='authenticated'
+        if stage=='authenticated':prepare.finish(current);advance('finishing');stage='finishing'
+        if stage=='finishing':
+            # finish deliberately removes the original provisioning marker. Validate
+            # real services/resources/identity plus authenticated execution again.
+            state['evidence']['final_winrm']=authenticate_after_restart(current,timeout)
+            pin=state['evidence']['final_winrm']['thumbprint']
+            config=Path(current['root'])/'instance.json';saved=json.loads(config.read_text());saved['winrm_thumbprint']=pin
+            save(config,saved);current['winrm_thumbprint']=pin
+            state['profile']=current;advance('running')
+    except Blocked:
+        raise
+    except Exception as exc:
+        # A stopped stage keeps the instance: report the journal and the last
+        # completed stage so the run is resumed, never rebuilt from scratch.
+        raise Blocked(str(exc),journal=journal,stage=state.get('stage'),target=current.get('name')) from exc
     return {'status':'running','target':current['name'],'uuid':current['uuid'],'journal':str(journal),
             'winrm':'guest-loopback authenticated; host published TLS pinned','rdp':'service ready; interactive session requires separate validation',
             'rdp_endpoint':f"{current['network']['publish_ip']}:{current['network']['rdp_port']}",
@@ -153,6 +187,27 @@ def rebuild(old, *, replacement=None, apply=False, discard=False, timeout=900):
     return result
 
 
+def blocked_payload(exc, profile_path=None):
+    """Describe a blocked run so it can be resumed instead of repeated.
+
+    A blocked create keeps its disk, network and TPM state.  Reporting the
+    journal, the last completed stage and the current domain state tells the
+    operator that the instance survives and which command continues it.
+    """
+    payload={'status':'blocked','reason':str(exc)}
+    journal=getattr(exc,'journal',None)
+    if journal:
+        target=getattr(exc,'target',None)
+        payload['journal']=journal
+        payload['stage']=getattr(exc,'stage',None)
+        payload['target']=target
+        payload['domstate']=domstate(target)
+        resume='sudo python3 scripts/instance.py create --profile %s --apply --resume %s'%(profile_path,journal)
+        payload['resume']=resume
+        payload['note']='the instance is preserved; resume from the journal instead of creating a second instance'
+    return payload
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=('create','rebuild'))
     parser.add_argument('--profile',required=True,type=Path);parser.add_argument('--replacement-profile',type=Path)
@@ -170,7 +225,7 @@ def main():
             result=rebuild(load(args.profile),replacement=load(args.replacement_profile,new=True) if args.replacement_profile else None,apply=args.apply,discard=args.discard,timeout=args.timeout)
         print(json.dumps(result,ensure_ascii=False,indent=2));return 0
     except Exception as exc:
-        print(json.dumps({'status':'blocked','reason':str(exc)},ensure_ascii=False));return 2
+        print(json.dumps(blocked_payload(exc,args.profile),ensure_ascii=False,indent=2));return 2
 
 
 if __name__=='__main__':raise SystemExit(main())

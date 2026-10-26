@@ -23,11 +23,13 @@ python3 scripts/profile.py PROFILE.json --new
 | `credentials` | mode、secret_file、local_clixml | 新建只能 `generate`、`prompt` 或 `file`；existing 仅适用于已存在且已验收的实例。profile 只放凭据路径/句柄；实际私密 `credentials.json` 或 DPAPI CliXML 可在目标 Linux/本机以 0600 保存，不能进入 Git、日志或命令行。 |
 | `media` | windows_iso、virtio_iso | 指向已下载的本地/宿主 ISO；缺失时进入下载交接，不自动拿未知镜像代替。 |
 | `gpu` | mode、pci_devices、approval | mode 必选 `none`/`passthrough`/`vgpu`。直通必须列出管理员明确专供、已绑定 vfio-pci 且 IOMMU group 完整的 PCI 地址；vgpu 只在准确型号、官方兼容/驱动/许可/profile 核验后进入独立集成分支。 |
-| `limits` | root_free_gib、start_free_gib、resume_free_gib、watch_free_gib | 磁盘和内存保护阈值，必须结合实际主机容量和其他任务预算向用户展示后确定。start_free 是冷启动门槛，必须覆盖 host_limit；运行中 watch 只做告警，不暂停 VM。新机可从 32/16/16 GiB（root/start 仍需按资源重新算）开始评估；当前 winvm01 的 250/204/80/64 只是现场案例。 |
+| `limits` | root_free_gib、start_free_gib、resume_free_gib、watch_free_gib | 磁盘和内存保护阈值，必须结合实际主机容量和其他任务预算向用户展示后确定。start_free 是冷启动门槛，必须覆盖 host_limit。运行中**内存不足只告警，不暂停**；**磁盘余量不足或网络、存储边界失效会暂停 VM**。新机可从 32/16/16 GiB（root/start 仍需按资源重新算）开始评估；当前 winvm01 的 250/204/80/64 只是现场案例。 |
 
 ## 资源口径
 
-`memory_gib` 是 Windows 内可见的固定内存；`host_limit_gib` 是该 VM cgroup 的最大宿主占用，不能当作物理内存预留。宿主仍须给系统、模型服务和其他用户留下预算。暂停不会释放 QEMU 已占用的 RSS，因此低内存不能靠暂停解决；守卫只记录告警，网络/存储边界失效才停止实例。冷启动仍需满足按实际容量计算的 `start_free_gib`；当前案例是 204 GiB，这个门槛不可被小模型擅自取消，也不可把它误套到所有新主机。
+`memory_gib` 是 Windows 内可见的固定内存；`host_limit_gib` 是该 VM cgroup 的最大宿主占用，不能当作物理内存预留。宿主仍须给系统、模型服务和其他用户留下预算。暂停不会释放 QEMU 已占用的 RSS，因此低内存不能靠暂停解决；守卫对**内存**只记录告警，对**磁盘余量不足**以及网络、存储边界失效则暂停实例。冷启动仍需满足按实际容量计算的 `start_free_gib`；当前案例是 204 GiB，这个门槛不可被小模型擅自取消，也不可把它误套到所有新主机。
+
+每台实例的磁盘守卫阈值来自它自己 profile 的 `root_free_gib`，但所有实例盯的是**同一个宿主根盘**。在这台宿主上新分配一块 store 会同时压低根盘空闲，可能把别的实例压到它自己的阈值以下，守卫随即把那台实例暂停——它可能正被别人使用。因此分配之前先看 `prepare_host --stage check` 输出的 `capacity_plan.instances_at_risk`：非空就停下，先腾出空间，或与 owner 确认后用 `configure` 下调对方阈值，再继续。不要为了新实例自动暂停他人的 VM，也不要擅自改别人实例的阈值。
 GPU 选择独立于 CPU/RAM：`none` 使用 CPU/软件图形；整卡 passthrough 会让宿主失去该卡，不能与宿主 Qwen 同时使用；vgpu 不是自动共享开关，必须经过型号、官方兼容矩阵、驱动和许可核验。
 
 ## 现有案例与新实例的边界
@@ -44,4 +46,4 @@ GPU 选择独立于 CPU/RAM：`none` 使用 CPU/软件图形；整卡 passthroug
 
 ## 同宿主登记
 
-初始化前先读写 `host_root/registry/<name>.json`（目录和登记文件由 root 创建，目录默认 0755、登记内容 root 可写），登记 name、UUID、root、bridge、subnet、RDP/WinRM 端口，即使 VM 还未启动也要占位。publish IP 可以共享，但 RDP/WinRM 端口必须唯一。新 profile 与登记表冲突时必须返回 `NAME_OR_PORT_CONFLICT` 或 `PORT_CONFLICT` 并停下，让用户选择新 name/端口；小模型不得自动猜端口或改 root。公共目录只保存展示所需字段，不保存密码或凭据路径。多台 VM 同时运行还要把各 VM 的 guest RAM、host_limit、磁盘预算和宿主已有任务合并核算；单台 cgroup 上限不能保证整机不 OOM。
+初始化前先读写 `host_root/registry/<name>.json`（目录和登记文件由 root 创建，目录默认 0755、登记内容 root 可写），登记 name、UUID、root、bridge、subnet、RDP/WinRM 端口，即使 VM 还未启动也要占位。publish IP 可以共享，但 RDP/WinRM 端口必须唯一。新 profile 与登记表冲突时必须返回 `NAME_OR_PORT_CONFLICT` 或 `PORT_CONFLICT` 并停下，让用户选择新 name/端口；小模型不得自动猜端口或改 root。公共目录只保存展示所需字段，不保存密码或凭据路径。多台 VM 同时运行还要把各 VM 的 guest RAM、host_limit、磁盘预算和宿主已有任务合并核算；单台 cgroup 上限不能保证整机不 OOM。登记还用于容量预检：`prepare_host --stage check` 会按各实例已安装的守卫阈值判断新分配会不会把某台实例压到暂停线以下。

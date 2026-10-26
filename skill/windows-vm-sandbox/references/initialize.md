@@ -55,6 +55,8 @@ sudo python3 scripts/prepare_host.py --profile /root/vm-profile/PROFILE.json --s
 
 storage 才创建专用存储预算、runtime 目录、磁盘、EFI/TPM 状态目录、XML/units 和阶段记录；不定义、不启动 VM。验收专用容量、root/vol 余量、loop/discard 策略和所有路径身份；不能只看 guest 报告容量。
 
+check 阶段同时输出 `capacity_plan`：本次要预分配多少 store、分配后宿主根盘还剩多少、同宿主每台已有实例的守卫阈值，以及 `instances_at_risk`（会被压到暂停线以下的实例）。列表非空时 check 以 `NEEDS_USER_INPUT` 阻断，此时先腾空间或与 owner 确认后下调对方阈值，不要继续分配。
+
 ## 3. 生成安装答案，不启动
 
 ```sh
@@ -71,6 +73,8 @@ sudo python3 scripts/prepare_host.py --profile /root/vm-profile/PROFILE.json --s
 
 activate 先建立网络隔离、宿主 cgroup、磁盘守卫、日志/计数器和来源白名单，再 define 安装 XML 并 start。它默认拒绝 guest 主动连公网、宿主和其他内网，只发布 profile 的 RDP/WinRM 端口；运行中低内存只告警，冷启动仍需满足 `start_free_gib`。安装启动后等待 Windows 无人值守完成，不要立即 finish。
 
+装机期间 guest agent 还没有应答，`guest_status.py` 会连续返回 `not_ready`——这是正常等待，不是失败。阶段细节与状态语义见 [实例生命周期](instance-lifecycle.md)。
+
 安装阶段验收：UEFI/Secure Boot/TPM 可见；安装器识别 SATA 系统盘；Windows 进入指定语言的 Pro/Enterprise；Windows 内 RAM/vCPU 与 profile 一致；NIC、RDP、WinRM、QGA 和 vioserial 都可用。PnPUtil 的 259 不必单独当失败，但 NIC/QGA 必须实际验证；3010 必须重启再验收。
 
 通过可信宿主 QGA 读取 readiness 和证书指纹：
@@ -79,9 +83,9 @@ activate 先建立网络隔离、宿主 cgroup、磁盘守卫、日志/计数器
 sudo python3 scripts/guest_status.py --profile /root/vm-profile/PROFILE.json
 ```
 
-应有 `provision_success=true`、指定电脑名/管理员、预期 RAM/vCPU、服务 Running 和 HTTPS thumbprint；安装中返回 not_ready 不应触发重新安装。将 QGA 返回的指纹填入控制端 profile，按 [Windows 操作](windows-agent.md) 导入凭据并认证；不从未知端点首次证书响应盲目信任。WinRM 验收身份/上传哈希，RDP 验收真实桌面。3010 必须重启后复验；用户名用 `COMPUTER\user`。WinRM 应 Automatic、`DelayedAutoStart=0`，仅 HTTPS。
+应有 `provision_success=true`、指定电脑名/管理员、预期 RAM/vCPU、服务 Running 和 HTTPS thumbprint。安装中返回 `not_ready` 不应触发重新安装；`not_running` 是域没运行，`unknown_instance` 是域没定义，`blocked` 才是要修的前置条件。将 QGA 返回的指纹填入控制端 profile，按 [Windows 操作](windows-agent.md) 导入凭据并认证；不从未知端点首次证书响应盲目信任。WinRM 验收身份/上传哈希，RDP 验收真实桌面。3010 必须重启后复验；用户名用 `COMPUTER\user`。WinRM 应 Automatic、`DelayedAutoStart=0`，仅 HTTPS。
 
-时钟要通过 QGA/guest 验证；时钟错乱会使 RDP/WinRM 证书和登录看似失败。网络放行只按目标 IP+端口增加，不能为方便打开整个网段。低内存守卫运行中只告警，暂停不会释放 RSS；冷启动仍需满足 `start_free_gib`。
+时钟要通过 QGA/guest 验证；时钟错乱会使 RDP/WinRM 证书和登录看似失败。网络放行只按目标 IP+端口增加，不能为方便打开整个网段。低内存守卫运行中只告警，暂停不会释放 RSS；冷启动仍需满足 `start_free_gib`。磁盘方向不同：根盘余量低于守卫阈值时实例会被暂停，因此同一宿主上并行分配实例前先看 `capacity_plan`。
 
 ## 5. 清理安装残留并完成运行定义
 

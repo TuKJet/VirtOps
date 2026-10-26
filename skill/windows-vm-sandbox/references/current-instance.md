@@ -17,6 +17,9 @@
 | 虚拟磁盘预算 | 宿主侧 150 GiB；单盘，Windows 可自行划分 D |
 | 冷启动门槛 | host `MemAvailable` 至少 204 GiB，并满足 root/vol 余量 |
 | 运行中低内存 | 仅告警，不暂停；暂停不会释放 QEMU RSS |
+| 运行中磁盘余量 | 低于 root_free_gib 阈值时**暂停**该实例；阈值取自该实例已安装的守卫，不是 profile 里的旧值 |
+
+守卫的两个方向不一样：内存不足只告警，磁盘余量不足则暂停。所有实例的磁盘阈值都盯着同一个宿主根盘，所以在这台宿主上新分配 store 可能把本实例压到阈值以下并把它暂停。分配新实例前用 `prepare_host --stage check` 的 `capacity_plan` 核对；本实例被暂停后先看 `journalctl -u winvm01-capguard` 的 `reason` 字段。
 
 ## 网络和入口
 

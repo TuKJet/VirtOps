@@ -72,6 +72,28 @@ Windows 无默认网关/DNS，因此“域名请求失败”可能只证明 DNS 
 
 存储检查 exact mount、外层文件 size/blocks/inode、FS UUID、loop discard queue=0、TPM bind 与 qcow backing chain。无 exact mount 时先修挂载，不向裸 `/home/.../vol` 写盘；禁止稀疏外层文件、额外镜像层、managed-save 内存文件、全局 fstrim 改动。WIM、qcow、TPM/NVRAM 和 VM 网络日志共用该总预算，Windows 显示的虚拟容量并非扣除基线后的可用容量。
 
+## 实例被自动暂停
+
+运行中的实例自己变成 `paused`，先看容量守卫而不是内存：
+
+```sh
+journalctl -u NAME-capguard --since '-30 min' | tail -20
+```
+
+`reason` 字段会写明原因。`root_free_below_<N>GiB` 表示宿主根盘余量掉到了本实例的磁盘守卫阈值以下，守卫随即暂停了它；`guard_prerequisite_failure` 表示挂载、网络或服务前置条件失效。**内存不足不会暂停实例，只记 `host_memory_pressure` 告警**，两者不要混。
+
+最常见的原因是同宿主上别的操作抢走了根盘空间：新建实例或 builder 时 store 是全额预分配，一申请就把根盘空闲拉低，可能把**正在被别人使用**的实例压到阈值以下。排查顺序：
+
+1. `df -h /` 看当前根盘空闲，和该实例的 `root_free_gib` 阈值比。
+2. `prepare_host --stage check` 的 `capacity_plan.instances_at_risk` 看还有哪些实例会被压到阈值以下。
+3. 找出占用来源：实例 store 预分配、发布的镜像、其它项目的权重或归档。
+
+处置顺序是：先腾空间；或与该实例的 owner 确认后用 `configure` 下调其 `root_free_gib`；然后再 resume。**不要为了迁就新实例去改别人实例的阈值，也不要自动 resume 一台正被别人使用的实例。** 阈值实际取自该实例已安装的 `vmctl.py`（`START_ROOT_FREE_MIN`），configure 改过之后与 profile 里的旧值可能不同。
+
+## 状态看起来像失败，其实还在跑
+
+`guest_status.py` 返回 `not_ready` 表示域在运行、guest agent 还没应答——Windows 正在安装时就是这样，持续几十分钟是正常的，不要因此重装。返回 `not_running` 是域没运行，`unknown_instance` 是域没定义，`blocked` 才是需要修的前置条件。`instance.py create` 返回 `blocked` 时实例通常已经活着，看输出里的 `journal`/`stage`/`domstate` 并按 `resume` 续作，不要重跑 create。完整语义见 [实例生命周期](instance-lifecycle.md)。
+
 ## 给下一位 agent 的失败交接
 
 只交接 profile 路径、stage、UUID、失败命令类别、精简错误、已做修正、验收缺项、下一条只读检查和需要用户回答的字段。密码、seed 内容、原始凭据输出不进入交接。恢复/安装失败保留必需的 request/context/marker 证据，成功后只清理已经不被引用的本次临时文件。

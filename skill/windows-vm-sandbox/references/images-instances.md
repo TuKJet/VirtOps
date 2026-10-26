@@ -2,6 +2,8 @@
 
 这是新 VM 的默认路径。系统只安装一次；每次开机实例从只读模板物化独立磁盘，再创建自己的账户、密码和管理身份。重建是删除整个实例后重新创建，不再恢复 C 盘，不为实例额外保存 WIM。
 
+每个阶段为什么停、停了以后怎么续作、整条链的容量峰值怎么算，见 [实例生命周期](instance-lifecycle.md)。
+
 ## 1. 一次制作基础镜像
 
 在目标 Linux 上使用本 Skill 的完整文件夹，不复制单个 Python 文件。选择专用、可丢弃的 builder：正常 profile 加 `"template_builder": true`，按 [初始化](initialize.md) 完成 ISO 安装、驱动、QGA 和批准软件的准备，到 finish 为止；**不要执行 finalize_baseline 或 reset**。普通同事正在用的 VM 不作为 builder。
@@ -38,7 +40,7 @@ create 内部完成预检、登记、预算存储、独立系统盘、全新 OVM
 
 新实例只发布 start/stop/status/logs/counters 基础入口；旧式 reset 和仅重注册定义的 delete/recreate 入口不生成，以免与完整删除重开混淆。已有宿主若 catalog 仍为旧版本，先按 operate 的受控运行时升级完成检查，不覆盖未知 catalog 文件。
 
-阶段 journal 位于 `host_root/operations/create-<id>.json`。启动或认证超时保留实例；用同一原始 profile 与 `--apply --resume JOURNAL` 续作。不重复创建磁盘，不把 timeout 当成允许清盘。storage 阶段中断时停止自动续作，先检查部分挂载和已分配存储。
+阶段 journal 位于 `host_root/operations/create-<id>.json`。启动或认证超时保留实例；用同一原始 profile 与 `--apply --resume JOURNAL` 续作。不重复创建磁盘，不把 timeout 当成允许清盘。storage 阶段中断时停止自动续作，先检查部分挂载和已分配存储。create 返回 `blocked` 时输出会带 `journal`、`stage`、`domstate` 和可直接执行的 `resume` 命令；`domstate` 为 running 说明实例已经活着，按 resume 续作，不要重跑 create。
 
 create 验证 Windows 名称/CPU/内存/唯一账户、服务、Windows 内 localhost WinRM 新账户认证和上传哈希，再从宿主验证已发布入口的 TLS pin。随后用 `credentials.ps1 import-linux` 和 `guest.ps1 inspect/run` 做控制端真实认证；RDP 桌面、双向实例网络阻断另外实测。
 

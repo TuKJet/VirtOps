@@ -31,7 +31,7 @@ def check_source() -> dict[str, str]:
     text = (SOURCE / "SKILL.md").read_text(encoding="utf-8")
     if not text.startswith("---\nname: windows-vm-sandbox\n") or "description:" not in text:
         raise ValueError("invalid Skill frontmatter")
-    for required in ("references/initialize.md", "references/operate.md", "references/reset.md", "references/windows-agent.md", "scripts/profile.py", "scripts/prepare_host.py"):
+    for required in ("references/initialize.md", "references/operate.md", "references/reset.md", "references/windows-agent.md", "references/instance-lifecycle.md", "scripts/profile.py", "scripts/prepare_host.py"):
         if required not in files:
             raise ValueError(f"missing required resource: {required}")
     for name in files:
