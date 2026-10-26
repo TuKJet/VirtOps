@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import tempfile
 
 ASSETS = Path(__file__).resolve().parents[1] / 'assets'
 GIB = 1024**3
@@ -88,16 +87,22 @@ def offline_disk(path, virtual_size):
     """Reuse the existing CRC-checked GPT reader and partition-clipped NBD IO.
 
     The imported helper has no command-line entry side effects. Each operation
-    gets its own module globals and private temporary GPT workspace.
+    gets its own module globals and a scratch area inside the store that owns
+    the disk being served.
     """
     spec = importlib.util.spec_from_file_location('virtops_image_disk_io', ASSETS/'runtime/winvm01_c_reset.py')
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.CURRENT = Path(path)
     helper.DISK_BYTES = virtual_size
-    with tempfile.TemporaryDirectory(prefix='virtops-image-gpt-') as temporary:
-        helper.RECOVERY = Path(temporary)
-        yield helper
+    # The imported helper keeps every scratch clip inside its own bounded store
+    # and refuses files outside it. Its module default points at the first
+    # instance's store, so rebind the store to the directory that owns the disk
+    # being served; otherwise the bounded-file check rejects the temporary clip
+    # and every read of a template disk fails.
+    helper.STORE = Path(path).parent
+    helper.RECOVERY = helper.STORE / 'recovery'
+    yield helper
 
 
 def verify_partition(helper, expected):

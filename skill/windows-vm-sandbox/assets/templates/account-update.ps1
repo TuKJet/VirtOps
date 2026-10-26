@@ -51,7 +51,15 @@ try{
         # Try only the recorded new credential; never reset or guess a password.
         if(-not(Test-Account $same.Name ([string]$r.password) $state.sid)){
             $adsi=[ADSI]("WinNT://./"+$same.Name+",user")
-            $adsi.ChangePassword([string]$r.old_password,[string]$r.password)
+            try{
+                $adsi.ChangePassword([string]$r.old_password,[string]$r.password)
+            }catch{
+                # The WinNT ADSI provider only lets an account change its own
+                # password. An administrator changing another account's
+                # password is refused with "Access denied"; SetPassword is the
+                # administrative path and does not need the old password.
+                $adsi.SetPassword([string]$r.password)
+            }
         }
         $state.phase='password_changed';Save-Stage $state
     }

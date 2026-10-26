@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 
-from profile import load, validate
+from profile import load, validate, cpus
 import prepare_host as prepare
 from base_image import inspect_manifest, trusted
 
@@ -62,6 +62,54 @@ def authenticate(data):
     return {key:result[key] for key in ('thumbprint','upload_sha256','execution','rdp_service_running')}
 
 
+RESUME_KEYS = ('name','uuid','root','windows','network','image','credentials','limits')
+DERIVED_RESOURCES = ('cpu_order','threads_per_core','amd')
+
+
+def cpu_ids(value):
+    if not value:
+        return set()
+    if isinstance(value, (list, tuple)):
+        ids = set()
+        for item in value:
+            ids.update(cpus(str(item)))
+        return ids
+    return set(cpus(value))
+
+
+def same_resources(recorded, current):
+    """Compare a preflight-normalized resources block with the requested one.
+
+    The preflight rewrites an explicit CPU selection into a sorted comma list
+    and adds the derived cpu_order/threads_per_core/amd fields, so the CPU set
+    is compared as a set of ids and the derived fields are ignored, exactly
+    like the storage stage compares a saved profile.
+    """
+    for key, value in recorded.items():
+        if key in DERIVED_RESOURCES:
+            continue
+        if key not in current:
+            return False
+        if key == 'cpu_set':
+            if cpu_ids(value) != cpu_ids(current.get('cpu_set')):
+                return False
+        elif current[key] != value:
+            return False
+    return not [key for key in current if key not in recorded]
+
+
+def same_request(recorded, current):
+    """Decide whether a create journal belongs to the requested instance.
+
+    The journal stores the preflight-normalized profile, so the resources
+    block is compared semantically while every other identity field is
+    compared unchanged.
+    """
+    if any(recorded.get(key) != current.get(key) for key in RESUME_KEYS):
+        return False
+    return same_resources(recorded.get('resources') or {}, current.get('resources') or {})
+
+
 def create(data, *, apply=False, resume=None, timeout=900):
     validate(data,new=True)
     if data.get('image',{}).get('kind')!='base':raise ValueError('instance create requires image.kind=base; use prepare_host for the disposable installer builder')
@@ -72,7 +120,7 @@ def create(data, *, apply=False, resume=None, timeout=900):
                 'credentials_mode':data['credentials']['mode'],'next':'create --apply'}
     if resume:
         journal=trusted(resume);state=json.loads(journal.read_text())
-        if state.get('action')!='create' or any(state['profile'].get(k)!=data.get(k) for k in ('name','uuid','root','windows','network','image','resources','credentials','limits')):
+        if state.get('action')!='create' or not same_request(state.get('profile') or {}, data):
             raise ValueError('resume journal belongs to another instance request')
         if state['stage']=='allocating':raise ValueError('storage allocation was interrupted; inspect bounded mounts and journal before cleanup, never repeat formatting')
         current=state['profile']

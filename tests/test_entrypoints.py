@@ -8,6 +8,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,6 +162,27 @@ class EntryPointTests(unittest.TestCase):
                 self.assertIn('"name": "catalog-vm"', result.stdout)
                 self.assertIn('"runtime_state": "shut off"', result.stdout)
                 self.assertNotIn('sudo', result.stdout.lower())
+
+
+class BootKeyTests(unittest.TestCase):
+    """OVMF asks for a keypress before it boots removable installation media."""
+
+    def setUp(self):
+        self.prepare = load_prepare()
+
+    def test_boot_key_is_only_needed_for_installation_media(self):
+        data = {"media": {"windows_iso": None, "virtio_iso": "/srv/virtio.iso"}}
+        self.assertFalse(self.prepare.needs_boot_key(data))
+        data["media"]["windows_iso"] = "/srv/windows.iso"
+        self.assertTrue(self.prepare.needs_boot_key(data))
+
+    def test_boot_key_press_is_bounded_and_tolerates_a_missing_domain(self):
+        calls = []
+        with mock.patch.object(self.prepare, "run", side_effect=lambda argv, **kwargs: calls.append(argv)):
+            self.prepare.press_boot_key("alpha", seconds=0.2, interval=0.01)
+        self.assertTrue(calls)
+        for argv in calls:
+            self.assertEqual(argv[:3], ["virsh", "send-key", "alpha"])
 
 
 if __name__ == '__main__':

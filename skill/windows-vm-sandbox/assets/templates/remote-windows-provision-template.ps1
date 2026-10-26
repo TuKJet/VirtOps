@@ -183,6 +183,35 @@ New-NetFirewallRule -DisplayName 'Remote VM baseline RDP TCP' -Direction Inbound
 Set-Service -Name TermService -StartupType Automatic
 Start-Service -Name TermService
 
+# Windows OOBE can leave the well-known "defaultuser0" placeholder account and
+# its profile behind. A template must hold exactly one provisioned account and
+# no foreign profile, so the placeholder is removed before the template
+# preflight inspects this builder.
+$placeholder = Get-LocalUser -Name 'defaultuser0' -ErrorAction SilentlyContinue
+if ($placeholder) {
+    Get-CimInstance -ClassName Win32_UserProfile | Where-Object { $_.SID -eq $placeholder.SID.Value } | Remove-CimInstance -ErrorAction SilentlyContinue
+    Remove-LocalUser -SID $placeholder.SID -ErrorAction SilentlyContinue
+}
+
+# Windows 11 enables Device Encryption on its own when a TPM is present, which
+# leaves a half-encrypted volume that cannot be captured as a template. The
+# policy travels with the published image, so derived instances stay
+# unencrypted as well.
+$deviceEncryption = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceEncryption'
+New-Item -Path $deviceEncryption -Force | Out-Null
+New-ItemProperty -Path $deviceEncryption -Name 'AllowDeviceEncryption' -PropertyType DWord -Value 0 -Force | Out-Null
+New-ItemProperty -Path $deviceEncryption -Name 'DisableDeviceEncryption' -PropertyType DWord -Value 1 -Force | Out-Null
+$volume = Get-BitLockerVolume -MountPoint C: -ErrorAction SilentlyContinue
+if ($volume -and [string]$volume.VolumeStatus -ne 'FullyDecrypted') {
+    manage-bde.exe -off C: | Out-Null
+    $deadline = (Get-Date).AddMinutes(10)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 15
+        $volume = Get-BitLockerVolume -MountPoint C: -ErrorAction SilentlyContinue
+        if (-not $volume -or [string]$volume.VolumeStatus -eq 'FullyDecrypted') { break }
+    }
+}
+
 # Keep a bounded page file and record a credential-free success marker for
 # host-side QGA validation after the required reboot.
 $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem

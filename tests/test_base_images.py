@@ -90,5 +90,22 @@ class BaseImageTests(unittest.TestCase):
             self.assertNotEqual(source.stat().st_ino, target.stat().st_ino)
 
 
+    def test_offline_disk_binds_the_helper_store_to_the_served_disk(self):
+        # The imported disk helper refuses any scratch file outside its own
+        # bounded store, so the store has to follow the disk being served.
+        with tempfile.TemporaryDirectory() as td:
+            disk = Path(td) / "vol" / "current.qcow2"
+            disk.parent.mkdir(parents=True)
+            disk.write_bytes(b"qcow2")
+            with self.base.offline_disk(disk, 64 * self.base.GIB) as helper:
+                self.assertEqual(helper.CURRENT, disk)
+                self.assertEqual(helper.STORE, disk.parent)
+                self.assertEqual(helper.RECOVERY, disk.parent / "recovery")
+                helper.RECOVERY.mkdir(parents=True, exist_ok=True)
+                scratch = helper.RECOVERY / "clip.bin"
+                scratch.write_bytes(b"clip")
+                helper.bounded_file(scratch)
+
+
 if __name__ == "__main__":
     unittest.main()

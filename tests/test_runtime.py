@@ -135,5 +135,33 @@ class RuntimeRenderingTests(unittest.TestCase):
         self.assertEqual(select_cpu(data,topology)['resources']['threads_per_core'],1)
 
 
+    def test_unattend_declares_the_windowspe_locale(self):
+        # Without the locale component in the windowsPE pass, Windows Setup
+        # shows the interactive language and keyboard pages and an unattended
+        # install stops on a dialog nobody can answer.
+        data = render_profile("alpha", 1)
+        files = seed_files(data, "P@ssw0rd123456")
+        root = ET.fromstring(files["Autounattend.xml"])
+        ns = {"u": "urn:schemas-microsoft-com:unattend"}
+        passes = [node for node in root.findall("u:settings", ns) if node.get("pass") == "windowsPE"]
+        self.assertEqual(len(passes), 1)
+        names = [component.get("name") for component in passes[0].findall("u:component", ns)]
+        self.assertIn("Microsoft-Windows-Setup", names)
+        self.assertIn("Microsoft-Windows-International-Core", names)
+        locale = [component for component in passes[0].findall("u:component", ns)
+                  if component.get("name") == "Microsoft-Windows-International-Core"][0]
+        self.assertEqual(locale.findtext("u:InputLocale", namespaces=ns), "zh-CN")
+        self.assertEqual(locale.findtext("u:UILanguage", namespaces=ns), "zh-CN")
+
+    def test_provisioning_clears_the_oobe_placeholder_and_device_encryption(self):
+        provision = (ROOT / "skill/windows-vm-sandbox/assets/templates/"
+                     "remote-windows-provision-template.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Get-LocalUser -Name 'defaultuser0'", provision)
+        self.assertIn("Remove-LocalUser -SID $placeholder.SID", provision)
+        self.assertIn("AllowDeviceEncryption", provision)
+        self.assertIn("DisableDeviceEncryption", provision)
+        self.assertIn("manage-bde.exe -off C:", provision)
+
+
 if __name__ == "__main__":
     unittest.main()

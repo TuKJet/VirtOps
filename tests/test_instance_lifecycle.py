@@ -134,5 +134,53 @@ class InstanceLifecycleTests(unittest.TestCase):
             self.assertFalse(any(name.endswith(("reset.sh", "winvm01_c_reset.py", "winvm01_recovery.py")) for name in rendered))
 
 
+class ResumeRequestTests(unittest.TestCase):
+    """A create journal stores the preflight-normalized profile."""
+
+    def setUp(self):
+        self.instance = load(SCRIPTS / "instance.py", f"instance_{id(self)}")
+
+    def request(self, cpu_set="0-3"):
+        data = profile(Path("/srv/instances/alpha"), "alpha", str(uuid.uuid4()))
+        data["resources"]["cpu_set"] = cpu_set
+        for key in ("cpu_order", "threads_per_core", "amd"):
+            data["resources"].pop(key, None)
+        return data
+
+    def normalized(self, data):
+        import copy
+        result = copy.deepcopy(data)
+        result["resources"].update(
+            cpu_set=",".join(str(n) for n in range(0, 4)),
+            cpu_order=[0, 1, 2, 3], threads_per_core=1, amd=False)
+        return result
+
+    def test_resume_accepts_the_normalized_profile_of_the_same_request(self):
+        data = self.request()
+        self.assertTrue(self.instance.same_request(self.normalized(data), data))
+
+    def test_the_normalized_profile_really_differs_from_the_requested_one(self):
+        # The preflight rewrites the resources block, so the previous
+        # field-by-field comparison rejected every resume of the same request.
+        data = self.request()
+        normalized = self.normalized(data)
+        self.assertNotEqual(normalized["resources"], data["resources"])
+        self.assertTrue(any(normalized["resources"].get(key) != data["resources"].get(key)
+                            for key in normalized["resources"]))
+        self.assertTrue(self.instance.same_request(normalized, data))
+
+    def test_resume_rejects_a_different_instance(self):
+        data = self.request()
+        other = self.normalized(data)
+        other["uuid"] = str(uuid.uuid4())
+        self.assertFalse(self.instance.same_request(other, data))
+
+    def test_resume_rejects_a_different_cpu_selection(self):
+        data = self.request()
+        other = self.normalized(data)
+        other["resources"]["cpu_set"] = "8-11"
+        self.assertFalse(self.instance.same_request(other, data))
+
+
 if __name__ == "__main__":
     unittest.main()

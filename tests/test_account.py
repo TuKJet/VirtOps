@@ -35,4 +35,12 @@ class AccountCliTests(unittest.TestCase):
         with patch.object(sys,'argv',['account.py','--profile',str(PROFILE),'--admin-user','alice','--credentials-mode','generate','--apply']),patch.object(m.subprocess,'run',side_effect=execute):
             self.assertEqual(m.main(),0)
 
+    def test_account_update_falls_back_to_setpassword_for_an_administrator(self):
+        # The WinNT ADSI provider refuses ChangePassword when an administrator
+        # changes another account's password; SetPassword is the way out.
+        helper=(ROOT/'skill/windows-vm-sandbox/assets/templates/account-update.ps1').read_text(encoding='utf-8-sig')
+        self.assertRegex(helper,r"try\{[^}]*ChangePassword[^}]*\}catch\{[^}]*SetPassword")
+        self.assertIn('$adsi.SetPassword([string]$r.password)',helper)
+
+
 if __name__=='__main__': unittest.main()

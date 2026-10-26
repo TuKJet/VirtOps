@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 
 from profile import load, cpus
@@ -422,6 +423,28 @@ def seed(data):
         os.chown(output,0,pwd.getpwnam('libvirt-qemu').pw_gid);output.chmod(0o640)
 
 
+def needs_boot_key(data):
+    """Only the fresh-installer path boots from removable installation media.
+
+    A template derived instance starts from the EFI system partition of its own
+    disk, so it never needs the OVMF keypress.
+    """
+    return bool(data.get('media',{}).get('windows_iso'))
+
+
+def press_boot_key(name, seconds=90, interval=1.5):
+    """Answer the OVMF prompt that asks for a keypress on installation media.
+
+    OVMF treats a CD-ROM as removable media and waits for a keypress before it
+    boots it. Without the keypress the builder stops at "No bootable option or
+    device was found" and the unattended installation never starts.
+    """
+    deadline=time.monotonic()+seconds
+    while time.monotonic()<deadline:
+        run(['virsh','send-key',name,'KEY_ENTER'],check=False,timeout=15)
+        time.sleep(interval)
+
+
 def activate(data):
     root=Path(data['root']);name=data['name']
     if not (root/'vol/state/autounattend.iso').is_file(): raise RuntimeError('Run the seed stage first')
@@ -447,6 +470,10 @@ def activate(data):
         run(['sysctl','-w','net.ipv4.ip_forward=1'])
     run(['virsh','define','--validate',str(root/'vol/state/install.xml')])
     run([str(root/'scripts/start.sh')],timeout=150)
+    if needs_boot_key(data):
+        # Only the fresh-installer path boots from removable media; a template
+        # derived instance starts from its own EFI system partition.
+        press_boot_key(name)
 
 
 def finish(data):
