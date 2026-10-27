@@ -52,6 +52,47 @@ PnPUtil 返回 259（没有更多匹配项）可能已存在合适驱动，需�
 
 若暂停后时间偏差，先比较宿主和 Windows UTC；允许时通过 QGA `guest-set-time` 传入宿主 **Unix 纳秒**。先修时间再判断证书/认证，不为此重置 TPM、NVRAM 或密码。
 
+## RDP 连上后几十秒内断开
+
+和「连不上」是两回事：认证成功、桌面出现、图形管道协商成 `0xA0600`(AVC)，然后会话在几十秒内被拆掉，客户端报原因码 **2308**（`0x904`，套接字已关闭）。
+
+先看客户端 `Microsoft-Windows-TerminalServices-RDPClient/Operational`：
+
+| 事件 | 含义 |
+|---|---|
+| 1102 | 客户端启动了到服务器的**多传输**（UDP）连接 |
+| 1103 | 多传输连接**已建立** |
+| 1104 | 多传输连接**无法建立** |
+| 1026 | 断开原因码，2308 = 套接字被本地关闭 |
+
+**1102 后紧跟 1104，就是 UDP 多路传输没打通。** Windows 11 客户端协商 `0xA0600` 图形管道后必须使用 UDP 多路传输；UDP 不通时客户端不会退回纯 TCP，而是把整条会话拆掉，所以现象是「刚连上就断」而不是「一直连不上」。
+
+两处都要查，缺一处都还是断：
+
+```sh
+# 宿主：发布端口有没有 UDP 的 DNAT 与放行
+sudo nft list ruleset | grep -E 'udp dport (13389|你的端口)'
+# guest：防火墙有没有放行 UDP 3389
+Get-NetFirewallRule -DisplayName 'Remote VM baseline RDP *'
+```
+
+修法：宿主把 RDP 端口**同时**发布为 TCP 和 UDP（`PUBLISHED_UDP`），guest 放行 `Remote VM baseline RDP UDP`。WinRM 仍然只走 TCP。
+
+## 大包被静默丢弃（MTU 不对齐）
+
+症状不是报错，而是：连接能建立，但桌面刷新卡顿、大文件传输停滞、SSH 传大包时进度条走到一半不动。
+
+判据是**丢包大小有明确分界**：同一条链路上 `ping -M do -s 1300` 通、`-s 1400` 100% 丢。
+
+```sh
+ping -M do -s 1400 PEER     # 丢
+ping -M do -s 1300 PEER     # 通
+```
+
+原因是 guest 没有默认网关，TCP 的 MSS 由 guest 网卡 MTU 决定；桥和网卡还是 1500 时，guest 会协商出承载 publish_ip 的传输层装不下的报文段，这个报文段被静默丢弃、不回 ICMP。
+
+修法见 [profile.md](profile.md) 的「发布地址的 MTU」：`network.mtu` 填承载 publish_ip 的那条传输的 MTU，桥和 guest 网卡一起对齐。**只改一边仍然丢包。**
+
 ## WinRM 无法执行
 
 - 验证 HTTPS 5986 listener、证书实际 thumbprint、`WinRM` 为 Automatic 且 `DelayedAutoStart=0`。仅检查服务会漏掉延迟自动启动问题。

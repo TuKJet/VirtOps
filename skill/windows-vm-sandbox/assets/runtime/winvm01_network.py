@@ -15,6 +15,7 @@ Traffic model:
   * no guest default gateway or DNS is configured by this script
   * only 192.168.20.0/24 may reach 192.168.20.5:13389 -> guest:3389
     and 192.168.20.5:15986 -> guest:5986
+  * the published RDP port is forwarded over TCP and UDP; WinRM over TCP only
   * localhost 127.0.0.1 may use the same two published ports
   * inbound connections are SNATed to 172.30.61.1 so a no-gateway guest can
     reply; no general masquerade or egress rule is installed
@@ -61,6 +62,11 @@ LOCALHOST = "127.0.0.1"
 LOCAL_ENDPOINTS = ((LOCALHOST, LOCALHOST), (PUBLISH_IP, PUBLISH_IP))
 
 PUBLISHED = ((13389, 3389), (15986, 5986))
+# The RDP client negotiates a UDP transport (multitransport) on the same
+# published port.  Publishing RDP over TCP only makes the Windows client abort
+# the session seconds after connecting, so the RDP port is published over UDP
+# as well.  WinRM stays TCP only.
+PUBLISHED_UDP = ((13389, 3389),)
 LOG_LIMIT = "10/min"
 LOG_BURST = "20"
 
@@ -344,6 +350,25 @@ def filter4_specs() -> dict[str, list[list[str]]]:
                     "-j", "ACCEPT",
                 ]
             )
+    for original_port, guest_port in PUBLISHED_UDP:
+        for source, original_ip in ((CLIENT_NET, PUBLISH_IP), (LOCALHOST, LOCALHOST)):
+            specs[FILTER4["forward_to"]].append(
+                [
+                    "-p", "udp", "-s", source, "-d", GUEST_IP,
+                    "--dport", str(guest_port), "-m", "conntrack", "--ctstate", "NEW",
+                    "--ctorigdst", original_ip, "--ctorigdstport", str(original_port),
+                    "-j", "ACCEPT",
+                ]
+            )
+        for source, original_ip in LOCAL_ENDPOINTS:
+            specs[FILTER4["output"]].append(
+                [
+                    "-p", "udp", "-s", source, "-d", GUEST_IP, "-o", BRIDGE,
+                    "--dport", str(guest_port), "-m", "conntrack", "--ctstate", "NEW",
+                    "--ctorigdst", original_ip, "--ctorigdstport", str(original_port),
+                    "-j", "ACCEPT",
+                ]
+            )
     specs[FILTER4["input"]].insert(-1, log_rule("input"))
     specs[FILTER4["forward_from"]].insert(-1, log_rule("fwd-from"))
     specs[FILTER4["forward_to"]].extend([log_rule("fwd-to"), ["-j", "DROP"]])
@@ -382,6 +407,23 @@ def nat_specs() -> dict[str, list[list[str]]]:
             specs[NAT["postrouting"]].append(
                 [
                     "-p", "tcp", "-s", source, "-d", GUEST_IP, "--dport", str(guest_port),
+                    "-m", "conntrack", "--ctstate", "DNAT",
+                    "--ctorigdst", original_ip, "--ctorigdstport", str(original_port),
+                    "-j", "SNAT", "--to-source", BRIDGE_IP,
+                ]
+            )
+    for original_port, guest_port in PUBLISHED_UDP:
+        specs[NAT["prerouting"]].append(
+            ["-p", "udp", "-s", CLIENT_NET, "-d", PUBLISH_IP, "--dport", str(original_port), "-j", "DNAT", "--to-destination", f"{GUEST_IP}:{guest_port}"]
+        )
+        for source, original_ip in LOCAL_ENDPOINTS:
+            specs[NAT["output"]].append(
+                ["-p", "udp", "-s", source, "-d", original_ip, "--dport", str(original_port), "-j", "DNAT", "--to-destination", f"{GUEST_IP}:{guest_port}"]
+            )
+        for source, original_ip in ((CLIENT_NET, PUBLISH_IP), (LOCALHOST, LOCALHOST)):
+            specs[NAT["postrouting"]].append(
+                [
+                    "-p", "udp", "-s", source, "-d", GUEST_IP, "--dport", str(guest_port),
                     "-m", "conntrack", "--ctstate", "DNAT",
                     "--ctorigdst", original_ip, "--ctorigdstport", str(original_port),
                     "-j", "SNAT", "--to-source", BRIDGE_IP,

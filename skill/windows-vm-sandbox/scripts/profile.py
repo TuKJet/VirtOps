@@ -110,6 +110,16 @@ def validate(data: dict, *, new: bool = False) -> dict:
             raise ValueError('published ports must be integers 1..65535')
     if net['rdp_port'] == net['winrm_port']:
         raise ValueError('RDP and WinRM published ports must differ')
+    # The published address is normally reached over a tunnel whose MTU is
+    # smaller than 1500.  The dedicated bridge and the guest NIC are aligned
+    # to this value, so a packet that fits the transport also fits the bridge
+    # and is never dropped without a reply.  1500 keeps the current behaviour
+    # for a plain LAN publish address.
+    mtu = net.get('mtu')
+    if mtu is None:
+        mtu = 1500
+    if type(mtu) is not int or not 1280 <= mtu <= 9000:
+        raise ValueError('network.mtu must be an integer between 1280 and 9000')
     account = required(data, 'windows.admin_user')
     if not re.fullmatch('[A-Za-z][A-Za-z0-9_.-]{0,19}', account) or account.lower() in {'administrator', 'guest', 'defaultaccount', 'system', 'administrators', 'wdagutilityaccount'}:
         raise ValueError('choose a new 1-20 character ASCII Windows account, excluding built-in names')

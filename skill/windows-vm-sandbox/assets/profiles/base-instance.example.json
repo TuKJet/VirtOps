@@ -9,7 +9,7 @@
   "image": {"kind": "base", "manifest": null},
   "resources": {"memory_gib": null, "host_limit_gib": null, "vcpus": null, "storage_gib": null, "cpu_set": null},
   "gpu": {"mode": null, "pci_devices": [], "dedicated": null},
-  "network": {"bridge": null, "subnet": null, "bridge_ip": null, "guest_ip": null, "publish_ip": null, "client_cidr": null, "rdp_port": null, "winrm_port": null},
+  "network": {"bridge": null, "subnet": null, "bridge_ip": null, "guest_ip": null, "publish_ip": null, "client_cidr": null, "rdp_port": null, "winrm_port": null, "mtu": null},
   "windows": {"computer_name": null, "admin_user": null, "language": null, "image_index": null},
   "media": {"windows_iso": null, "virtio_iso": null},
   "credentials": {"mode": null, "secret_file": null, "local_clixml": null},

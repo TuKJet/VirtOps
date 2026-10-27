@@ -1,5 +1,5 @@
 {
-  "captured_utc": "2026-10-15T13:55:26.185924+08:00",
+  "captured_utc": "2026-10-27T14:05:29+08:00",
   "layout": "scripts/*.sh and scripts/lib/",
   "sha256": {
     "admission.py": "d7fb7f54bbb7821b351fa48e38482f86c90cbe21df7ac324c9da84b5b4b2ac6b",
@@ -19,10 +19,10 @@
     "stop.sh": "2131fe9245a6fb35d30f5a00e08489fac0ee37d79af1de60a84120b8daabdd8f",
     "vm.sh": "656bbc262b453226360922fe825584dca1cd5cc72c3aab868e3aa54a8ebc39ff",
     "vmctl.py": "33097000bac3741b86d14add5616881716293001e743b180867f0faba9bfb634",
-    "winvm01_bridge.py": "aec7474959c25912ee5fd67244272febc9ffab5098f64955a411861c2521e9b0",
+    "winvm01_bridge.py": "114742a5615963ff224f24847b4de8fc10325687992ff0e8d31e98d277e85e78",
     "winvm01_c_reset.py": "0817f01ab2388dbab2043ec08c3b930f102e68a1123e7f71f20515f0d2215a7a",
     "winvm01_log_collector.py": "ba1274ce7bcf38ac19f762499fc331b44d9150355645d63b225645ed5a7de858",
-    "winvm01_network.py": "5508e25e3bedb963c8203d9df5a1a662d808c279b06280780db9f12d7e207825",
+    "winvm01_network.py": "ccdf62bf7dc48c44cc94c9f00b4958457abe32033590b5f001c8c9ae9c712fa9",
     "winvm01_qga.py": "e3065001862f461f76c56e198658e3f6874daac2e10b6b644ca2f03069637d5f",
     "winvm01_recovery.py": "a3bdd09d859fe0e1c03652c748d3702636173e66190f34d663f0302b22bde88c",
     "winvm01_reset_context.ps1": "d4c04f5f7e4df359817e631c3dbf16b5c33ee1959463fcdafff9d4401efbfcf3",

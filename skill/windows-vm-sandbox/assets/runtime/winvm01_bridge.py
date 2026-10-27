@@ -4,6 +4,13 @@ import json
 import pathlib
 import subprocess
 
+# The published address is normally reached over a tunnel whose MTU is
+# smaller than 1500.  The bridge must not claim a larger MTU than the
+# transport that carries the publish address, otherwise the guest negotiates
+# a TCP segment size that the transport silently drops.  The renderer
+# replaces this value with network.mtu from the profile.
+MTU = 1500
+
 
 def run(args, check=True):
     return subprocess.run(args, capture_output=True, text=True, check=check)
@@ -34,8 +41,11 @@ def main():
     pathlib.Path('/proc/sys/net/ipv6/conf/winbr01/disable_ipv6').write_text('1')
     # Only this bridge permits localhost DNAT replies; global routing stays unchanged.
     pathlib.Path('/proc/sys/net/ipv4/conf/winbr01/route_localnet').write_text('1')
+    # Keep the bridge MTU in step with the transport that carries the publish
+    # address, so no guest segment is larger than the path can carry.
+    run(['ip', 'link', 'set', 'dev', 'winbr01', 'mtu', str(MTU)])
     run(['ip', 'link', 'set', 'dev', 'winbr01', 'up'])
-    print('Dedicated bridge ready: winbr01, 172.30.61.1/30, no physical ports')
+    print(f'Dedicated bridge ready: winbr01, 172.30.61.1/30, mtu {MTU}, no physical ports')
 
 
 if __name__ == '__main__':

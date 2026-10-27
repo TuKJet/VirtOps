@@ -77,7 +77,9 @@ def runtime_files(data, store_uuid, inode):
               'MEMORY_MAX': resources['host_limit_gib'] * GIB, 'CPU_MAX': f"{resources['vcpus'] * 100000} 100000",
               'ALLOWED_CPUS': resources['cpu_set'], 'START_MEM_AVAILABLE_MIN': limits['start_free_gib'] * GIB,
               'START_ROOT_FREE_MIN': limits['root_free_gib'] * GIB, 'WATCH_MEM_AVAILABLE_MIN': limits['watch_free_gib'] * GIB,
-              'PUBLISHED': ((data['network']['rdp_port'], 3389), (data['network']['winrm_port'], 5986))}
+              'MTU': data['network'].get('mtu') or 1500,
+              'PUBLISHED': ((data['network']['rdp_port'], 3389), (data['network']['winrm_port'], 5986)),
+              'PUBLISHED_UDP': ((data['network']['rdp_port'], 3389),)}
     outputs = {}
     runtime_dir = ASSETS / 'runtime'
     missing = sorted(name for name in RUNTIME_SOURCES if not (runtime_dir / name).is_file())
@@ -183,7 +185,8 @@ def seed_files(data, password):
     ET.register_namespace('', 'urn:schemas-microsoft-com:unattend')
     ET.register_namespace('wcm', 'http://schemas.microsoft.com/WMIConfig/2002/State')
     mapping = substitutions(data, 'unused', 0)
-    mapping.update({'__VM_NAME__': data['windows']['computer_name'], '__BOOTSTRAP_ADMIN_USER__': data['windows']['admin_user']})
+    mapping.update({'__VM_NAME__': data['windows']['computer_name'], '__BOOTSTRAP_ADMIN_USER__': data['windows']['admin_user'],
+                    '__VM_MTU__': str(data['network'].get('mtu') or 1500)})
     root = ET.fromstring(replace_text((ASSETS / 'templates/remote-windows-unattend-template.xml').read_text(encoding='utf-8-sig'), mapping))
     ns = {'u': 'urn:schemas-microsoft-com:unattend'}
     if data.get('image', {}).get('kind') == 'base':

@@ -74,6 +74,16 @@ class ProfileValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must differ"):
             validate(data, new=True)
 
+    def test_profile_accepts_an_optional_mtu_and_rejects_out_of_range(self):
+        data = profile_for()
+        self.assertIs(validate(data, new=True), data)
+        data["network"]["mtu"] = 1360
+        self.assertIs(validate(data, new=True), data)
+        for bad in (1279, 9001, 1500.0, "1500", True):
+            data["network"]["mtu"] = bad
+            with self.assertRaisesRegex(ValueError, "network.mtu"):
+                validate(data, new=True)
+
     def test_profile_rejects_zero_uuid(self):
         data = profile_for()
         data["uuid"] = "00000000-0000-0000-0000-000000000000"

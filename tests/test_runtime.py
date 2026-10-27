@@ -75,6 +75,52 @@ class RuntimeRenderingTests(unittest.TestCase):
         self.assertNotIn('"13389"', first_network + second_network)
         self.assertNotIn('"15986"', first_network + second_network)
 
+    def test_rdp_is_published_over_udp_and_the_bridge_follows_the_profile_mtu(self):
+        data = render_profile("alpha", 1)
+        data["network"]["mtu"] = 1360
+        outputs = runtime_files(data, "22222222-2222-4222-8222-222222222222", 50001)
+        network = outputs["scripts/lib/alpha_network.py"]
+        # The RDP port is published over UDP as well: a Windows client that
+        # negotiates the 0xA0600 graphics pipeline moves the session to the
+        # UDP multitransport and tears it down when UDP is not published.
+        self.assertIn("PUBLISHED_UDP = ((23001, 3389),)", network)
+        self.assertIn(
+            '["-p", "udp", "-s", CLIENT_NET, "-d", PUBLISH_IP, "--dport", '
+            'str(original_port), "-j", "DNAT", "--to-destination", f"{GUEST_IP}:{guest_port}"]',
+            network,
+        )
+        self.assertIn(
+            '"-p", "udp", "-s", source, "-d", GUEST_IP,', network
+        )
+        self.assertIn(
+            '"-p", "udp", "-s", source, "-d", original_ip, "--dport", str(original_port), '
+            '"-j", "DNAT", "--to-destination", f"{GUEST_IP}:{guest_port}"]',
+            network,
+        )
+        # WinRM stays TCP only: it is not part of the UDP publication set.
+        self.assertNotIn("PUBLISHED_UDP = ((23001, 3389), (24001, 5986))", network)
+        bridge = outputs["scripts/lib/alpha_bridge.py"]
+        self.assertIn("MTU = 1360", bridge)
+        self.assertIn("'mtu', str(MTU)", bridge)
+        compile(bridge, "alpha_bridge.py", "exec")
+
+    def test_provision_template_opens_rdp_udp_and_aligns_the_guest_nic_mtu(self):
+        data = render_profile("alpha", 1)
+        data["network"]["mtu"] = 1360
+        files = seed_files(data, "Safe!Password123")
+        provision = files["remote-windows-provision.ps1"]
+        self.assertIn(
+            "New-NetFirewallRule -DisplayName 'Remote VM baseline RDP UDP' "
+            "-Direction Inbound -Action Allow -Protocol UDP -LocalPort 3389",
+            provision,
+        )
+        self.assertIn("[int]$InterfaceMtu = 1360", provision)
+        self.assertIn(
+            "Set-ItemProperty -Path $interfaceRegistry -Name MTU -Type DWord -Value $InterfaceMtu",
+            provision,
+        )
+        self.assertNotIn("__VM_MTU__", provision)
+
     def test_domain_xml_cpu_memory_firmware_mac_and_name(self):
         data = render_profile("alpha", 1)
         xml = ET.fromstring(domain_xml(data, installing=True))

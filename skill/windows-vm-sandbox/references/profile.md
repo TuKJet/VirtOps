@@ -18,12 +18,29 @@ python3 scripts/profile.py PROFILE.json --new
 | `labels` | owner、purpose | 新建时填写的公开目录标签，用于 `status --all` 识别使用者和用途；旧实例可省略。不能当作权限或安全边界，不得放密码、token 或敏感信息。 |
 | `ssh` | `host`、`user`、`port`、`identity_file`、`bind_address` | 宿主管理入口。优先让用户指定物理或组网地址；先 `inspect`，不把 SSH 失败当作安装失败。 |
 | `resources` | `memory_gib`、`host_limit_gib`、`vcpus`、`storage_gib`、`cpu_set` | Windows 看到的 RAM 固定为 memory；host_limit 至少比 guest 多 2 GiB，给 QEMU 开销；storage 是宿主总预算，创建后不得扩散。CPU set 若填写必须正好匹配 vcpus。GPU 不包含在 CPU 自动分配内，需单独填写 `gpu`。 |
-| `network` | bridge、/30、publish_ip、client_cidr、RDP/WinRM 端口 | 每台 VM 使用独立 /30 和唯一发布端口。client_cidr 是可进入的来源网段。端口必须不同，不能默认为 13389/15986；端口由用户选择，冲突时拒绝，不替用户自动换端口。 |
+| `network` | bridge、/30、publish_ip、client_cidr、RDP/WinRM 端口、mtu | 每台 VM 使用独立 /30 和唯一发布端口。client_cidr 是可进入的来源网段。端口必须不同，不能默认为 13389/15986；端口由用户选择，冲突时拒绝，不替用户自动换端口。`mtu` 可选，默认 1500；见下方「发布地址的 MTU」。 |
 | `windows` | computer_name、admin_user、language、image_index | admin_user 是用户明确选择的管理员账户，供 AI 与桌面共用；不要擅自创建 agent/rdesktop。image_index 必须从 ISO 的实际清单中选 Pro/Enterprise 和语言/架构匹配项。 |
 | `credentials` | mode、secret_file、local_clixml | 新建只能 `generate`、`prompt` 或 `file`；existing 仅适用于已存在且已验收的实例。profile 只放凭据路径/句柄；实际私密 `credentials.json` 或 DPAPI CliXML 可在目标 Linux/本机以 0600 保存，不能进入 Git、日志或命令行。 |
 | `media` | windows_iso、virtio_iso | 指向已下载的本地/宿主 ISO；缺失时进入下载交接，不自动拿未知镜像代替。 |
 | `gpu` | mode、pci_devices、approval | mode 必选 `none`/`passthrough`/`vgpu`。直通必须列出管理员明确专供、已绑定 vfio-pci 且 IOMMU group 完整的 PCI 地址；vgpu 只在准确型号、官方兼容/驱动/许可/profile 核验后进入独立集成分支。 |
 | `limits` | root_free_gib、start_free_gib、resume_free_gib、watch_free_gib | 磁盘和内存保护阈值，必须结合实际主机容量和其他任务预算向用户展示后确定。start_free 是冷启动门槛，必须覆盖 host_limit；运行中 watch 只做告警，不暂停 VM。新机可从 32/16/16 GiB（root/start 仍需按资源重新算）开始评估；当前 winvm01 的 250/204/80/64 只是现场案例。 |
+
+## 发布地址的 MTU
+
+`network.mtu` 描述的是**承载 publish_ip 的那条传输**的 MTU，不是桥或网卡的默认值。专用桥和 guest 网卡会被对齐到这个值。
+
+原因：guest 没有默认网关，TCP 的 MSS 由它自己的网卡 MTU 决定。如果桥还是 1500 而传输层只跑得动 1360，guest 会协商出一个传输层装不下的报文段，这个报文段被**静默丢弃**、不回 ICMP，表现是连接建立后随机卡死或大文件传输停滞，而不是明确的报错。
+
+取值方法：先在宿主上看承载 publish_ip 的接口 MTU，再填同样的值。
+
+```sh
+ip -4 addr show                 # 找 publish_ip 所在的那条隧道/网卡
+ping -M do -s 1400 PEER        # 1400 丢包而 1300 通 = MTU 低于 1400
+```
+
+典型取值：直连局域网 1500；EasyTier/WireGuard 等组网隧道取隧道接口自身的 MTU（常见 1360/1380）。**不要凭印象填**，也不要为了绕过丢包而把 guest MTU 调大——那只会让丢包更晚出现。
+
+已经部署的实例改这个值需要重建桥（`ip link set dev BRIDGE mtu N`）并同步 guest 网卡（`Set-CimInstance MSFT_NetIPInterface` + 注册表 `MTU`），两者必须一起改；只改一边仍然会丢包。
 
 ## 资源口径
 

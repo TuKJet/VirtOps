@@ -13,6 +13,7 @@ param(
     [string]$AdminUser = '__BOOTSTRAP_ADMIN_USER__',
     [string]$GuestAddress = '172.30.61.2',
     [int]$PrefixLength = 30,
+    [int]$InterfaceMtu = __VM_MTU__,
     [string[]]$AllowedRemoteAddresses = @('172.30.61.1'),
     [string]$CertificateDnsName = 'winvm01'
 )
@@ -123,6 +124,20 @@ $interfaceRegistry = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\I
 Set-ItemProperty -Path $interfaceRegistry -Name NameServer -Value ''
 Set-ItemProperty -Path $interfaceRegistry -Name DhcpNameServer -Value ''
 
+# The published address is normally reached over a transport whose MTU is
+# smaller than 1500.  The dedicated bridge is aligned to the same value, so
+# the guest must align as well: otherwise the guest negotiates a TCP segment
+# size that the transport cannot carry and the segment is dropped without a
+# reply.  The registry value survives a reboot, the live value applies now.
+Set-ItemProperty -Path $interfaceRegistry -Name MTU -Type DWord -Value $InterfaceMtu
+foreach ($addressFamily in @(2, 23)) {
+    $ipInterface = Get-CimInstance -ClassName MSFT_NetIPInterface -Namespace 'root/StandardCimv2' |
+        Where-Object { $_.InterfaceIndex -eq $nic.ifIndex -and $_.AddressFamily -eq $addressFamily }
+    if ($ipInterface) {
+        Set-CimInstance -InputObject $ipInterface -Property @{ NlMtu = $InterfaceMtu } | Out-Null
+    }
+}
+
 # Default-deny only applies to new outbound traffic; replies for explicitly
 # admitted inbound sessions are statefully permitted.
 Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultInboundAction Block -DefaultOutboundAction Block
@@ -139,8 +154,10 @@ $san = '2.5.29.17={text}dns=winvm01&ipaddress=172.30.61.2&ipaddress=192.168.20.5
 $cert = New-SelfSignedCertificate -Subject "CN=$CertificateDnsName" -TextExtension $san -CertStoreLocation 'Cert:\LocalMachine\My' -KeyAlgorithm RSA -KeyLength 3072 -HashAlgorithm SHA256
 New-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet @{ Address = '*'; Transport = 'HTTPS' } -ValueSet @{ CertificateThumbprint = $cert.Thumbprint } | Out-Null
 
-# RDP uses the same vmadmin account as AI management. There is no UDP
-# 3389 firewall rule in this profile.
+# RDP uses the same vmadmin account as AI management.  The UDP 3389 rule is
+# required, not optional: a Windows client that negotiates the 0xA0600
+# graphics pipeline moves the session to the UDP multitransport, and a client
+# that cannot use it tears the whole session down seconds after connecting.
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 2
@@ -180,6 +197,7 @@ New-ItemProperty -Path $tsPolicy -Name fDisableCpm -PropertyType DWord -Value 1 
 
 New-NetFirewallRule -DisplayName 'Remote VM baseline WinRM HTTPS' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5986 -RemoteAddress $AllowedRemoteAddresses | Out-Null
 New-NetFirewallRule -DisplayName 'Remote VM baseline RDP TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -RemoteAddress $AllowedRemoteAddresses | Out-Null
+New-NetFirewallRule -DisplayName 'Remote VM baseline RDP UDP' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 3389 -RemoteAddress $AllowedRemoteAddresses | Out-Null
 Set-Service -Name TermService -StartupType Automatic
 Start-Service -Name TermService
 
