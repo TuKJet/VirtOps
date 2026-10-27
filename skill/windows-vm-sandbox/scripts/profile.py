@@ -7,6 +7,18 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import uuid
+import importlib.util
+
+
+def normalize_services(network: dict) -> list[dict]:
+    """Validate optional published services using the packaged pure policy."""
+    path = Path(__file__).resolve().parents[1] / 'assets/runtime/service_policy.py'
+    spec = importlib.util.spec_from_file_location('virtops_service_policy', path)
+    module = importlib.util.module_from_spec(spec)
+    if spec is None or spec.loader is None:
+        raise ValueError('published service policy is unavailable')
+    spec.loader.exec_module(module)
+    return module.normalize(network)
 
 
 def required(data, dotted):
@@ -110,6 +122,7 @@ def validate(data: dict, *, new: bool = False) -> dict:
             raise ValueError('published ports must be integers 1..65535')
     if net['rdp_port'] == net['winrm_port']:
         raise ValueError('RDP and WinRM published ports must differ')
+    normalize_services(net)
     account = required(data, 'windows.admin_user')
     if not re.fullmatch('[A-Za-z][A-Za-z0-9_.-]{0,19}', account) or account.lower() in {'administrator', 'guest', 'defaultaccount', 'system', 'administrators', 'wdagutilityaccount'}:
         raise ValueError('choose a new 1-20 character ASCII Windows account, excluding built-in names')

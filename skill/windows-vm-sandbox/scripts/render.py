@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import uuid
 import xml.etree.ElementTree as ET
+from profile import normalize_services
 
 ASSETS = Path(__file__).resolve().parents[1] / 'assets'
 GIB = 1024**3
@@ -25,12 +26,12 @@ RUNTIME_SOURCES = frozenset({
     # substitutions from the current reference VM.
     'owner_apply.ps1', 'owner_verify.ps1',
     'owner_environment.py', 'maintenance.py', 'instance_registry.py',
-    'admission.py',
+    'admission.py', 'service_policy.py',
 })
 NEUTRAL_RUNTIME_SOURCES = frozenset({
     'owner_apply.ps1', 'owner_verify.ps1', 'owner_environment.py', 'maintenance.py',
     'instance_registry.py',
-    'admission.py',
+    'admission.py', 'service_policy.py',
 })
 
 
@@ -77,7 +78,8 @@ def runtime_files(data, store_uuid, inode):
               'MEMORY_MAX': resources['host_limit_gib'] * GIB, 'CPU_MAX': f"{resources['vcpus'] * 100000} 100000",
               'ALLOWED_CPUS': resources['cpu_set'], 'START_MEM_AVAILABLE_MIN': limits['start_free_gib'] * GIB,
               'START_ROOT_FREE_MIN': limits['root_free_gib'] * GIB, 'WATCH_MEM_AVAILABLE_MIN': limits['watch_free_gib'] * GIB,
-              'PUBLISHED': ((data['network']['rdp_port'], 3389), (data['network']['winrm_port'], 5986))}
+              'PUBLISHED': ((data['network']['rdp_port'], 3389), (data['network']['winrm_port'], 5986)),
+              'PUBLISHED_SERVICES': tuple(normalize_services(data['network']))}
     outputs = {}
     runtime_dir = ASSETS / 'runtime'
     missing = sorted(name for name in RUNTIME_SOURCES if not (runtime_dir / name).is_file())

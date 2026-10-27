@@ -1,4 +1,5 @@
 import hashlib
+import contextlib
 import importlib.util
 import json
 import os
@@ -79,6 +80,44 @@ class UpgradeRuntimeTests(unittest.TestCase):
         self.assertEqual(unknown.read_text(encoding="utf-8"), "keep")
         self.assertFalse(result["restarted"])
         self.assertFalse(result["network_changed"])
+
+    def test_network_runtime_change_requires_service_transaction_before_any_write(self):
+        relative = Path('scripts/lib/winvm01_network.py')
+        network = self.root / relative
+        network.write_bytes(b'old-network\n')
+        expected = {'start.sh': {upgrade.sha256(self.old)},
+                    'winvm01_network.py': {upgrade.sha256(network)}}
+        with self.patch_checks(expected), mock.patch.object(upgrade, 'render_runtime', return_value={
+                Path('scripts/start.sh'): self.source.read_bytes(), relative: b'new-network\n'}):
+            result = upgrade.inspect(Path('profile.json'), apply=False)
+            self.assertTrue(result['network_update_required'])
+            with self.assertRaisesRegex(RuntimeError, 'publish_services.py transaction'):
+                upgrade.inspect(Path('profile.json'), apply=True)
+        self.assertEqual(network.read_bytes(), b'old-network\n')
+        self.assertIn('old', self.old.read_text())
+
+    def test_network_change_while_waiting_for_lock_blocks_all_writes(self):
+        relative = Path('scripts/lib/winvm01_network.py')
+        network = self.root / relative
+        network.write_bytes(b'current-network\n')
+        concurrent = b'concurrent-managed-network\n'
+        expected = {'start.sh': {upgrade.sha256(self.old)},
+                    'winvm01_network.py': {hashlib.sha256(concurrent).hexdigest()}}
+
+        @contextlib.contextmanager
+        def changed_before_lock(*args):
+            network.write_bytes(concurrent)
+            yield
+
+        with self.patch_checks(expected), mock.patch.object(upgrade, 'render_runtime', return_value={
+                Path('scripts/start.sh'): self.source.read_bytes(), relative: b'current-network\n'}), \
+                mock.patch.object(upgrade, 'lifecycle_lock', changed_before_lock), \
+                mock.patch.object(upgrade, 'atomic_copy') as copy:
+            with self.assertRaisesRegex(RuntimeError, 'before the lifecycle lock'):
+                upgrade.inspect(Path('profile.json'), apply=True)
+            copy.assert_not_called()
+        self.assertEqual(network.read_bytes(), concurrent)
+        self.assertIn('old', self.old.read_text())
 
     def test_changed_active_collector_is_restarted(self):
         collector = Path("scripts/lib/winvm01_log_collector.py")
@@ -227,13 +266,65 @@ class UpgradeRuntimeTests(unittest.TestCase):
             "GUEST_IP='10.0.0.2'\nPUBLISH_IP='192.0.2.1'\nCLIENT_NET='192.0.2.0/24'\n"
             "PUBLISHED=((13389,3389),(15986,5986))\n", encoding="utf-8")
         profile = dict(self.profile)
-        profile["network"] = {"bridge": "br0", "bridge_ip": "10.0.0.1", "guest_ip": "10.0.0.2",
+        profile["network"] = {"bridge": "br0", "subnet": "10.0.0.0/30", "bridge_ip": "10.0.0.1", "guest_ip": "10.0.0.2",
                                "publish_ip": "192.0.2.1", "client_cidr": "192.0.2.0/24",
                                "rdp_port": 13389, "winrm_port": 15986}
         upgrade.validate_network_helper(self.root, profile)
         helper.write_text(helper.read_text(encoding="utf-8").replace("13389", "13390"), encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "PUBLISHED"):
             upgrade.validate_network_helper(self.root, profile)
+
+    def test_network_helper_rejects_unexpected_services_for_empty_profile(self):
+        helper = self.root / "scripts/lib/winvm01_network.py"
+        helper.write_text(
+            "BRIDGE='br0'\nVM_NAME='winvm01'\nBRIDGE_IP='10.0.0.1'\n"
+            "GUEST_IP='10.0.0.2'\nPUBLISH_IP='192.0.2.1'\nCLIENT_NET='192.0.2.0/24'\n"
+            "PUBLISHED=((13389,3389),(15986,5986))\n"
+            "PUBLISHED_SERVICES=({'id':'mcp'},)\n", encoding="utf-8")
+        profile = dict(self.profile)
+        profile["network"] = {"bridge": "br0", "subnet": "10.0.0.0/30", "bridge_ip": "10.0.0.1", "guest_ip": "10.0.0.2",
+                               "publish_ip": "192.0.2.1", "client_cidr": "192.0.2.0/24",
+                               "rdp_port": 13389, "winrm_port": 15986}
+        with self.assertRaisesRegex(RuntimeError, "PUBLISHED_SERVICES"):
+            upgrade.validate_network_helper(self.root, profile)
+
+    def test_network_helper_requires_services_for_nonempty_profile(self):
+        helper = self.root / "scripts/lib/winvm01_network.py"
+        helper.write_text(
+            "BRIDGE='br0'\nVM_NAME='winvm01'\nBRIDGE_IP='10.0.0.1'\n"
+            "GUEST_IP='10.0.0.2'\nPUBLISH_IP='192.0.2.1'\nCLIENT_NET='192.0.2.0/24'\n"
+            "PUBLISHED=((13389,3389),(15986,5986))\n", encoding="utf-8")
+        profile = dict(self.profile)
+        profile["network"] = {"bridge": "br0", "subnet": "10.0.0.0/30", "bridge_ip": "10.0.0.1", "guest_ip": "10.0.0.2",
+                               "publish_ip": "192.0.2.1", "client_cidr": "192.0.2.0/24",
+                               "rdp_port": 13389, "winrm_port": 15986,
+                               "published_services": [{"id": "mcp", "publish_port": 18000, "guest_port": 8000}]}
+        with self.assertRaisesRegex(RuntimeError, "PUBLISHED_SERVICES"):
+            upgrade.validate_network_helper(self.root, profile)
+
+    def test_registry_services_are_canonical_and_legacy_empty_is_compatible(self):
+        profile = dict(self.profile)
+        profile["host_root"] = str(self.temp)
+        profile["root"] = str(self.root)
+        profile["network"] = {"bridge": "br0", "subnet": "10.0.0.0/30", "bridge_ip": "10.0.0.1",
+                               "guest_ip": "10.0.0.2", "publish_ip": "192.0.2.1",
+                               "client_cidr": "192.0.2.0/24", "rdp_port": 13389, "winrm_port": 15986}
+        registry = self.temp / "registry"
+        registry.mkdir()
+        row = upgrade.registry_module()._metadata(profile)
+        row.pop("published_services")
+        (registry / "winvm01.json").write_text(json.dumps(row), encoding="utf-8")
+        upgrade.check_registry(profile, self.root)
+
+        profile["network"]["published_services"] = [{"id": "mcp", "publish_port": 18000, "guest_port": 8000}]
+        with self.assertRaisesRegex(RuntimeError, "published_services"):
+            upgrade.check_registry(profile, self.root)
+
+        row = upgrade.registry_module()._metadata(profile)
+        row["published_services"][0]["publish_port"] = 18001
+        (registry / "winvm01.json").write_text(json.dumps(row), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "published_services"):
+            upgrade.check_registry(profile, self.root)
 
     @unittest.skipUnless(os.name == "posix", "Linux privilege gate")
     def test_apply_requires_root(self):

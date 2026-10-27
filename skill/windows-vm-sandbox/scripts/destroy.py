@@ -13,12 +13,25 @@ import sys
 import time
 import uuid
 import xml.etree.ElementTree as ET
+import importlib.util
 try:
     import fcntl
 except ImportError:
     fcntl=None
 
 class DestroyError(RuntimeError):pass
+
+
+def _published_services(network):
+    path = Path(__file__).resolve().parents[1] / 'assets/runtime/service_policy.py'
+    spec = importlib.util.spec_from_file_location('virtops_destroy_service_policy', path)
+    if spec is None or spec.loader is None:
+        raise DestroyError('published service policy is unavailable')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    try:
+        return module.normalize(network)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DestroyError(f'invalid published service policy: {exc}') from exc
 
 def run(argv, *, timeout=120, check=True):
     result=subprocess.run(argv,text=True,capture_output=True,timeout=timeout,env=dict(os.environ,LC_ALL='C'))
@@ -63,6 +76,8 @@ def validate_identity(profile, inv):
         if row.get(key)!=profile[key]:raise DestroyError('registry identity mismatch: '+key)
     for key in ('bridge','subnet','rdp_port','winrm_port'):
         if key in profile['network'] and row.get(key)!=profile['network'][key]:raise DestroyError('registry network identity mismatch')
+    if row.get('published_services', []) != _published_services(profile['network']):
+        raise DestroyError('registry published service identity mismatch')
     if inv['domain_xml']:
         xml=ET.fromstring(inv['domain_xml'])
         if xml.findtext('name')!=profile['name'] or xml.findtext('uuid')!=profile['uuid']:raise DestroyError('domain identity mismatch')

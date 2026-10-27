@@ -39,6 +39,7 @@ RUNTIME_FILES = frozenset({
     "winvm01_recovery.py", "winvm01_c_reset.py", "winvm01_reset_context.ps1",
     "winvm01_reset_postboot.ps1", "owner_apply.ps1", "owner_verify.ps1",
     "owner_environment.py", "maintenance.py", "instance_registry.py", "admission.py",
+    "service_policy.py",
 })
 
 
@@ -261,7 +262,7 @@ def validate_network_helper(root: Path, profile: dict) -> None:
     tree = ast.parse(helper.read_text(encoding="utf-8"), filename=str(helper))
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            if node.targets[0].id in {"BRIDGE", "VM_NAME", "BRIDGE_IP", "GUEST_IP", "PUBLISH_IP", "CLIENT_NET", "PUBLISHED"}:
+            if node.targets[0].id in {"BRIDGE", "VM_NAME", "BRIDGE_IP", "GUEST_IP", "PUBLISH_IP", "CLIENT_NET", "PUBLISHED", "PUBLISHED_SERVICES"}:
                 try:
                     values[node.targets[0].id] = ast.literal_eval(node.value)
                 except (ValueError, SyntaxError) as exc:
@@ -270,7 +271,21 @@ def validate_network_helper(root: Path, profile: dict) -> None:
                 "BRIDGE_IP": profile["network"]["bridge_ip"], "GUEST_IP": profile["network"]["guest_ip"],
                 "PUBLISH_IP": profile["network"]["publish_ip"], "CLIENT_NET": profile["network"]["client_cidr"],
                 "PUBLISHED": ((profile["network"]["rdp_port"], 3389), (profile["network"]["winrm_port"], 5986))}
+    # Always derive the canonical value.  A profile with no extras must reject
+    # a helper that quietly publishes services, while an old helper remains
+    # compatible only when the profile itself has no extras.
+    profile_spec = importlib.util.spec_from_file_location("virtops_profile_services", HERE / "profile.py")
+    profile_module = importlib.util.module_from_spec(profile_spec)
+    assert profile_spec and profile_spec.loader
+    profile_spec.loader.exec_module(profile_module)
+    expected_services = tuple(profile_module.normalize_services(profile["network"]))
+    expected["PUBLISHED_SERVICES"] = expected_services
     for key, value in expected.items():
+        if key == "PUBLISHED_SERVICES" and key not in values and not expected_services:
+            # Rendered helpers from before optional services were introduced
+            # have no constant at all; preserve that empty-profile upgrade
+            # compatibility without allowing a non-empty omission.
+            continue
         if values.get(key) != value:
             raise RuntimeError(f"network helper constant does not match profile: {key}")
 
@@ -313,6 +328,13 @@ def check_registry(profile: dict, root: Path) -> None:
     for key in ("name", "uuid", "root", "bridge", "subnet", "publish_ip", "rdp_port", "winrm_port"):
         if existing.get(key) != expected.get(key):
             raise RuntimeError(f"registry entry does not match profile: {key}")
+    expected_services = expected.get("published_services", [])
+    if "published_services" not in existing and not expected_services:
+        # Older registry rows predate optional services and are valid only for
+        # a profile that also declares no extras.
+        return
+    if existing.get("published_services") != expected_services:
+        raise RuntimeError("registry entry does not match profile: published_services")
 
 
 def register_catalog(profile: dict) -> None:
@@ -481,15 +503,25 @@ def inspect(profile_path: Path, *, apply=False, lock_dir=Path("/run/lock")) -> d
             mismatches.append(str(relative))
     if mismatches:
         raise RuntimeError("external edits detected: " + ", ".join(sorted(mismatches)))
+    network_relative = Path('scripts/lib') / f"{profile['name']}_network.py"
+    network_update_required = (network_relative in rendered and
+                               destination[network_relative].read_bytes() != rendered[network_relative])
     if not apply:
         return {"status": "ready", "mode": "check", "vm_state": state, "store": store,
                 "files": len(rendered), "apply_required": True,
+                "network_update_required": network_update_required,
                 "restarted": False, "network_changed": False, "collector_restarted": False}
+    if network_update_required:
+        raise RuntimeError('network runtime update requires the guarded publish_services.py transaction; '
+                           'ordinary runtime upgrade cannot change the guard expectation without its rules')
     if state not in {"running", "paused"}:
         raise RuntimeError("apply requires the existing VM to remain running or paused")
     with lifecycle_lock(profile["name"], lock_dir):
         # Re-run all checks while holding the instance lifecycle lock.
-        inspect(profile_path, apply=False, lock_dir=lock_dir)
+        locked_check = inspect(profile_path, apply=False, lock_dir=lock_dir)
+        if locked_check["network_update_required"]:
+            raise RuntimeError('network runtime update requires the guarded publish_services.py transaction; '
+                               'network runtime changed before the lifecycle lock was acquired')
         collector_relative = Path("scripts/lib") / f"{profile['name']}_log_collector.py"
         collector_target = root / collector_relative
         collector_content_changed = False

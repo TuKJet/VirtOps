@@ -74,6 +74,26 @@ class ProfileValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must differ"):
             validate(data, new=True)
 
+    def test_profile_accepts_loopback_service_and_canonicalizes_defaults(self):
+        data = profile_for()
+        data["network"]["published_services"] = [{"id": "cad-mcp", "publish_port": 18000, "guest_port": 8000}]
+        self.assertIs(validate(data, new=True), data)
+        from profile import normalize_services
+        self.assertEqual(normalize_services(data["network"])[0]["allowed_sources"], ["127.0.0.1/32"])
+
+    def test_profile_rejects_unbounded_or_guest_target_services(self):
+        data = profile_for()
+        data["network"]["published_services"] = [{"id": "cad-mcp", "publish_port": 18000, "guest_port": 8000,
+            "access": "network", "publish_ip": data["network"]["publish_ip"], "allowed_sources": ["0.0.0.0/0"]}]
+        with self.assertRaisesRegex(ValueError, "bounded|inside"):
+            validate(data, new=True)
+
+    def test_profile_rejects_extra_service_port_collision(self):
+        data = profile_for()
+        data["network"]["published_services"] = [{"id": "cad-mcp", "publish_port": data["network"]["rdp_port"], "guest_port": 8000}]
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            validate(data, new=True)
+
     def test_profile_rejects_zero_uuid(self):
         data = profile_for()
         data["uuid"] = "00000000-0000-0000-0000-000000000000"

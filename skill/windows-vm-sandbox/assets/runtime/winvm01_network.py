@@ -38,12 +38,14 @@ filter/nat chains and their existing rules are never flushed.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import shutil
 import subprocess
 import sys
 import re
+import shlex
 from pathlib import Path
 import maintenance
 from typing import Iterable, Sequence
@@ -61,6 +63,7 @@ LOCALHOST = "127.0.0.1"
 LOCAL_ENDPOINTS = ((LOCALHOST, LOCALHOST), (PUBLISH_IP, PUBLISH_IP))
 
 PUBLISHED = ((13389, 3389), (15986, 5986))
+PUBLISHED_SERVICES = ()
 LOG_LIMIT = "10/min"
 LOG_BURST = "20"
 
@@ -88,11 +91,48 @@ class RuleError(RuntimeError):
 
 
 def maintenance_active():
-    return maintenance.active(Path(__file__).resolve().parents[2] / 'vol/recovery/owner-transition.json')
+    base = Path(__file__).resolve().parents[2]
+    if maintenance.active(base / 'vol/recovery/owner-transition.json'):
+        return True
+    return maintenance.active(base / 'vol/state/private/network-transition.json')
 
 
 def maintenance_gate():
-    return maintenance.Gate(VM_NAME, PUBLISHED, FILTER4['forward_to'], FILTER4['output'])
+    extra = tuple((item['publish_port'], item['guest_port']) for item in PUBLISHED_SERVICES
+                  if item.get('access') == 'host-loopback' and item.get('allow_during_maintenance'))
+    return maintenance.Gate(VM_NAME, PUBLISHED + extra, FILTER4['forward_to'], FILTER4['output'])
+
+
+def extra_services():
+    return tuple(PUBLISHED_SERVICES or ())
+
+
+def admitted_flows():
+    """Return only currently declared client-to-guest service tuples.
+
+    Each item is ``(source, original_ip, publish_port, guest_port, chain)``.
+    Keeping this as the single source for NEW and conntrack rules ensures that
+    removing a declaration also removes its ESTABLISHED/RELATED admission.
+    """
+    flows = []
+    for source, original_ip, original_port, guest_port in (
+        (CLIENT_NET, PUBLISH_IP, 13389, 3389),
+        (CLIENT_NET, PUBLISH_IP, 15986, 5986),
+        (LOCALHOST, LOCALHOST, 13389, 3389),
+        (LOCALHOST, LOCALHOST, 15986, 5986),
+    ):
+        flows.append((source, original_ip, original_port, guest_port, FILTER4["forward_to"]))
+    for original_port, guest_port in PUBLISHED:
+        for source, original_ip in LOCAL_ENDPOINTS:
+            flows.append((source, original_ip, original_port, guest_port, FILTER4["output"]))
+    for item in extra_services():
+        original_port, guest_port = item['publish_port'], item['guest_port']
+        if item['access'] == 'host-loopback':
+            flows.append((LOCALHOST, LOCALHOST, original_port, guest_port, FILTER4["output"]))
+        else:
+            for source in item['allowed_sources']:
+                flows.append((source, PUBLISH_IP, original_port, guest_port, FILTER4["forward_to"]))
+    return tuple(flows)
 
 
 def log_rule(route: str) -> list[str]:
@@ -305,45 +345,27 @@ def require_vm_stopped() -> None:
 
 def filter4_specs() -> dict[str, list[list[str]]]:
     specs: dict[str, list[list[str]]] = {
-        FILTER4["input"]: [
-            ["-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-            ["-j", "DROP"],
-        ],
-        FILTER4["forward_from"]: [
-            ["-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-            ["-j", "DROP"],
-        ],
-        FILTER4["forward_to"]: [
-            ["-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-        ],
-        FILTER4["output"]: [
-            ["-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
-        ],
+        FILTER4["input"]: [], FILTER4["forward_from"]: [],
+        FILTER4["forward_to"]: [], FILTER4["output"]: [],
     }
-    for source, original_ip, original_port, guest_port in (
-        (CLIENT_NET, PUBLISH_IP, 13389, 3389),
-        (CLIENT_NET, PUBLISH_IP, 15986, 5986),
-        (LOCALHOST, LOCALHOST, 13389, 3389),
-        (LOCALHOST, LOCALHOST, 15986, 5986),
-    ):
-        specs[FILTER4["forward_to"]].append(
-            [
-                "-p", "tcp", "-s", source, "-d", GUEST_IP,
-                "--dport", str(guest_port), "-m", "conntrack", "--ctstate", "NEW",
-                "--ctorigdst", original_ip, "--ctorigdstport", str(original_port),
-                "-j", "ACCEPT",
-            ]
-        )
-    for original_port, guest_port in PUBLISHED:
-        for source, original_ip in LOCAL_ENDPOINTS:
-            specs[FILTER4["output"]].append(
-                [
-                    "-p", "tcp", "-s", source, "-d", GUEST_IP, "-o", BRIDGE,
-                    "--dport", str(guest_port), "-m", "conntrack", "--ctstate", "NEW",
-                    "--ctorigdst", original_ip, "--ctorigdstport", str(original_port),
-                    "-j", "ACCEPT",
-                ]
-            )
+    for source, original_ip, original_port, guest_port, original_chain in admitted_flows():
+        original = [
+            '-p', 'tcp', '-s', source, '-d', GUEST_IP,
+            '--dport', str(guest_port), '-m', 'conntrack',
+            '--ctstate', 'NEW,ESTABLISHED', '--ctdir', 'ORIGINAL',
+            '--ctorigsrc', source, '--ctorigdst', original_ip,
+            '--ctorigdstport', str(original_port), '-j', 'ACCEPT',
+        ]
+        specs[original_chain].append(original)
+        reply_chain = FILTER4['input'] if original_chain == FILTER4['output'] else FILTER4['forward_from']
+        specs[reply_chain].append([
+            '-p', 'tcp', '-m', 'conntrack', '--ctstate', 'ESTABLISHED,RELATED',
+            '--ctdir', 'REPLY', '--ctorigsrc', source, '--ctorigdst', original_ip,
+            '--ctorigdstport', str(original_port), '--ctreplsrc', GUEST_IP,
+            '--ctreplsrcport', str(guest_port), '-j', 'ACCEPT',
+        ])
+    specs[FILTER4["input"]].append(["-j", "DROP"])
+    specs[FILTER4["forward_from"]].append(["-j", "DROP"])
     specs[FILTER4["input"]].insert(-1, log_rule("input"))
     specs[FILTER4["forward_from"]].insert(-1, log_rule("fwd-from"))
     specs[FILTER4["forward_to"]].extend([log_rule("fwd-to"), ["-j", "DROP"]])
@@ -387,6 +409,25 @@ def nat_specs() -> dict[str, list[list[str]]]:
                     "-j", "SNAT", "--to-source", BRIDGE_IP,
                 ]
             )
+    for item in extra_services():
+        original_port, guest_port = item['publish_port'], item['guest_port']
+        if item['access'] == 'host-loopback':
+            specs[NAT['output']].append([
+                '-p', 'tcp', '-s', '127.0.0.1', '-d', '127.0.0.1', '--dport', str(original_port),
+                '-j', 'DNAT', '--to-destination', f'{GUEST_IP}:{guest_port}'])
+            specs[NAT['postrouting']].append([
+                '-p', 'tcp', '-s', '127.0.0.1', '-d', GUEST_IP, '--dport', str(guest_port),
+                '-m', 'conntrack', '--ctstate', 'DNAT', '--ctorigdst', '127.0.0.1',
+                '--ctorigdstport', str(original_port), '-j', 'SNAT', '--to-source', BRIDGE_IP])
+        else:
+            for source in item['allowed_sources']:
+                specs[NAT['prerouting']].append([
+                    '-p', 'tcp', '-s', source, '-d', PUBLISH_IP, '--dport', str(original_port),
+                    '-j', 'DNAT', '--to-destination', f'{GUEST_IP}:{guest_port}'])
+                specs[NAT['postrouting']].append([
+                    '-p', 'tcp', '-s', source, '-d', GUEST_IP, '--dport', str(guest_port),
+                    '-m', 'conntrack', '--ctstate', 'DNAT', '--ctorigdst', PUBLISH_IP,
+                    '--ctorigdstport', str(original_port), '-j', 'SNAT', '--to-source', BRIDGE_IP])
     return specs
 
 
@@ -414,9 +455,29 @@ def verify_private_chains() -> None:
                 f"private chain rule count mismatch in {table}/{chain}: "
                 f"expected {len(expected)}, found {len(actual)}; inspect iptables-save"
             )
+        translator = shutil.which("ip6tables-translate" if v6 else "iptables-translate")
+        if not translator:
+            raise RuleError("iptables-translate is required for strict rule verification")
+        expected_canonical = []
         for rule in expected:
             if not rule_exists(base + ["-C", chain, *rule]):
                 raise RuleError(f"private chain rule mismatch in {table}/{chain}: {' '.join(rule)}")
+            translated = command([translator, "-A", chain, *rule], check=False)
+            if translated.returncode:
+                raise RuleError(f"cannot translate expected rule in {table}/{chain}")
+            expected_canonical.append(" ".join(translated.stdout.split()))
+        listed = command(base + ["-S", chain]).stdout.splitlines()
+        actual_canonical = []
+        for line in listed:
+            if not line.startswith(f"-A {chain} "):
+                continue
+            tokens = shlex.split(line)
+            translated = command([translator, "-A", chain, *tokens[2:]], check=False)
+            if translated.returncode:
+                raise RuleError(f"cannot translate installed rule in {table}/{chain}")
+            actual_canonical.append(" ".join(translated.stdout.split()))
+        if actual_canonical != expected_canonical:
+            raise RuleError(f"private chain rule order/content mismatch in {table}/{chain}")
 
 
 def drop_counters(backend: str) -> list[dict[str, object]]:
@@ -494,7 +555,11 @@ def add_jumps() -> None:
     ensure_top_jump(table="filter", parent="INPUT", chain=FILTER4["input"], match=["-i", BRIDGE])
     ensure_top_jump(table="filter", parent="FORWARD", chain=FILTER4["forward_from"], match=["-i", BRIDGE])
     ensure_top_jump(table="filter", parent="FORWARD", chain=FILTER4["forward_to"], match=["-o", BRIDGE])
+    # Keep the bridge-interface guard for ordinary bridge traffic.  OUTPUT
+    # sees DNAT after nat/OUTPUT, but localhost DNAT can retain lo as its
+    # output interface, so add a second exact guest-destination jump.
     ensure_top_jump(table="filter", parent="OUTPUT", chain=FILTER4["output"], match=["-o", BRIDGE])
+    ensure_top_jump(table="filter", parent="OUTPUT", chain=FILTER4["output"], match=["-d", GUEST_IP])
     ensure_top_jump(v6=True, table="filter", parent="INPUT", chain=FILTER6["input"], match=["-i", BRIDGE])
     ensure_top_jump(v6=True, table="filter", parent="FORWARD", chain=FILTER6["forward_from"], match=["-i", BRIDGE])
     ensure_top_jump(v6=True, table="filter", parent="FORWARD", chain=FILTER6["forward_to"], match=["-o", BRIDGE])
@@ -502,6 +567,120 @@ def add_jumps() -> None:
     ensure_top_jump(table="nat", parent="PREROUTING", chain=NAT["prerouting"], match=[])
     ensure_top_jump(table="nat", parent="OUTPUT", chain=NAT["output"], match=[])
     ensure_top_jump(table="nat", parent="POSTROUTING", chain=NAT["postrouting"], match=[])
+
+
+def _normalize_jump_args(args: list[str]) -> tuple[str, ...]:
+    """Normalize iptables-save's optional /32 on address matches."""
+    result = list(args)
+    for index, token in enumerate(result[:-1]):
+        if token in {"-s", "-d"}:
+            try:
+                address = ipaddress.ip_interface(result[index + 1]).ip
+            except ValueError:
+                continue
+            result[index + 1] = str(address)
+    return tuple(result)
+
+
+def _catalog_guard_jumps() -> dict[tuple[bool, str, str], set[tuple[str, ...]]]:
+    """Return exact guard jumps owned by this host's known instances."""
+    records = [{"name": VM_NAME, "bridge": BRIDGE, "guest_ip": GUEST_IP}]
+    base = Path(__file__).resolve().parents[2]
+    instance = base / "instance.json"
+    host_root = base
+    if instance.is_file() and not instance.is_symlink():
+        try:
+            own = json.loads(instance.read_text(encoding="utf-8"))
+            network = own.get("network", {})
+            records[0].update({"name": own.get("name", VM_NAME), "bridge": network.get("bridge", BRIDGE),
+                               "guest_ip": network.get("guest_ip", GUEST_IP)})
+            host_root = Path(own.get("host_root") or base)
+        except (OSError, ValueError, KeyError):
+            pass
+    registry = host_root / "registry"
+    if registry.is_dir() and not registry.is_symlink():
+        for path in registry.glob("*.json"):
+            try:
+                st = path.stat()
+                # Registry metadata is non-secret and intentionally 0644;
+                # only root ownership and protection against writes matter.
+                if path.is_symlink() or st.st_uid != 0 or st.st_mode & 0o022:
+                    continue
+                row = json.loads(path.read_text(encoding="utf-8"))
+                if row.get("name") == records[0].get("name"):
+                    continue
+                guest_ip = None
+                root = Path(row["root"])
+                state = root / "instance.json"
+                if state.is_file() and not state.is_symlink():
+                    saved = json.loads(state.read_text(encoding="utf-8"))
+                    if saved.get("name") == row.get("name") and saved.get("uuid") == row.get("uuid"):
+                        guest_ip = saved.get("network", {}).get("guest_ip")
+                records.append({"name": row.get("name"), "bridge": row.get("bridge"), "guest_ip": guest_ip})
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+
+    allowed: dict[tuple[bool, str, str], set[tuple[str, ...]]] = {}
+    for row in records:
+        name, bridge = row.get("name"), row.get("bridge")
+        if not name or not bridge:
+            continue
+        prefix = str(name).upper()
+        def add(v6, table, parent, args):
+            allowed.setdefault((v6, table, parent), set()).add(_normalize_jump_args(args))
+        add(False, "filter", "INPUT", ["-i", bridge, "-j", prefix + "_INPUT"])
+        add(False, "filter", "FORWARD", ["-i", bridge, "-j", prefix + "_FWD_FROM"])
+        add(False, "filter", "FORWARD", ["-o", bridge, "-j", prefix + "_FWD_TO"])
+        add(False, "filter", "OUTPUT", ["-o", bridge, "-j", prefix + "_OUTPUT"])
+        if row.get("guest_ip"):
+            add(False, "filter", "OUTPUT", ["-d", row["guest_ip"], "-j", prefix + "_OUTPUT"])
+        add(True, "filter", "INPUT", ["-i", bridge, "-j", prefix + "_INPUT6"])
+        add(True, "filter", "FORWARD", ["-i", bridge, "-j", prefix + "_FWD_FROM6"])
+        add(True, "filter", "FORWARD", ["-o", bridge, "-j", prefix + "_FWD_TO6"])
+        add(True, "filter", "OUTPUT", ["-o", bridge, "-j", prefix + "_OUTPUT6"])
+        add(False, "nat", "PREROUTING", ["-j", prefix + "_DNAT"])
+        add(False, "nat", "OUTPUT", ["-j", prefix + "_DNAT_OUT"])
+        add(False, "nat", "POSTROUTING", ["-j", prefix + "_SNAT"])
+    return allowed
+
+
+def verify_parent_jumps() -> None:
+    """Reject unknown/duplicate rules before this instance's guard jumps."""
+    own = {
+        (False, "filter", "INPUT"): [["-i", BRIDGE, "-j", FILTER4["input"]]],
+        (False, "filter", "FORWARD"): [["-i", BRIDGE, "-j", FILTER4["forward_from"]],
+                                         ["-o", BRIDGE, "-j", FILTER4["forward_to"]]],
+        (False, "filter", "OUTPUT"): [["-o", BRIDGE, "-j", FILTER4["output"]],
+                                       ["-d", GUEST_IP, "-j", FILTER4["output"]]],
+        (True, "filter", "INPUT"): [["-i", BRIDGE, "-j", FILTER6["input"]]],
+        (True, "filter", "FORWARD"): [["-i", BRIDGE, "-j", FILTER6["forward_from"]],
+                                        ["-o", BRIDGE, "-j", FILTER6["forward_to"]]],
+        (True, "filter", "OUTPUT"): [["-o", BRIDGE, "-j", FILTER6["output"]]],
+        (False, "nat", "PREROUTING"): [["-j", NAT["prerouting"]]],
+        (False, "nat", "OUTPUT"): [["-j", NAT["output"]]],
+        (False, "nat", "POSTROUTING"): [["-j", NAT["postrouting"]]],
+    }
+    allowed = _catalog_guard_jumps()
+    for key, expected in own.items():
+        v6, table, parent = key
+        lines = command(iptables(v6, table) + ["-S", parent]).stdout.splitlines()
+        rows = []
+        for line in lines:
+            if not line.startswith("-A "):
+                continue
+            tokens = shlex.split(line)
+            rows.append(_normalize_jump_args(tokens[2:]))
+        expected_norm = [_normalize_jump_args(rule) for rule in expected]
+        for rule in expected_norm:
+            if rows.count(rule) != 1:
+                raise RuleError(f"dedicated jump count mismatch in {table}/{parent}: {' '.join(rule)}")
+        own_positions = [index for index, row in enumerate(rows) if row in expected_norm]
+        if not own_positions:
+            raise RuleError(f"missing dedicated jump in {table}/{parent}")
+        permitted = allowed.get(key, set())
+        for row in rows[:max(own_positions)]:
+            if row not in permitted:
+                raise RuleError(f"unknown rule precedes dedicated jump in {table}/{parent}: {' '.join(row)}")
 
 
 def apply(backend: str, *, allow_missing_bridge: bool = False, refresh_private: bool = False) -> None:
@@ -539,11 +718,15 @@ def remove(backend: str) -> None:
     require_root()
     check_backend(backend)
     require_vm_stopped()
+    # A failed transition can leave an unreferenced per-instance gate. Remove
+    # its own jumps before deleting the private parent chains below.
+    maintenance_gate().remove()
     jumps = [
         (False, "filter", "INPUT", ["-i", BRIDGE, "-j", FILTER4["input"]]),
         (False, "filter", "FORWARD", ["-i", BRIDGE, "-j", FILTER4["forward_from"]]),
         (False, "filter", "FORWARD", ["-o", BRIDGE, "-j", FILTER4["forward_to"]]),
         (False, "filter", "OUTPUT", ["-o", BRIDGE, "-j", FILTER4["output"]]),
+        (False, "filter", "OUTPUT", ["-d", GUEST_IP, "-j", FILTER4["output"]]),
         (True, "filter", "INPUT", ["-i", BRIDGE, "-j", FILTER6["input"]]),
         (True, "filter", "FORWARD", ["-i", BRIDGE, "-j", FILTER6["forward_from"]]),
         (True, "filter", "FORWARD", ["-o", BRIDGE, "-j", FILTER6["forward_to"]]),
@@ -595,6 +778,7 @@ def verify(backend: str) -> None:
         (False, "filter", "FORWARD", ["-i", BRIDGE, "-j", FILTER4["forward_from"]]),
         (False, "filter", "FORWARD", ["-o", BRIDGE, "-j", FILTER4["forward_to"]]),
         (False, "filter", "OUTPUT", ["-o", BRIDGE, "-j", FILTER4["output"]]),
+        (False, "filter", "OUTPUT", ["-d", GUEST_IP, "-j", FILTER4["output"]]),
         (True, "filter", "INPUT", ["-i", BRIDGE, "-j", FILTER6["input"]]),
         (True, "filter", "FORWARD", ["-i", BRIDGE, "-j", FILTER6["forward_from"]]),
         (True, "filter", "FORWARD", ["-o", BRIDGE, "-j", FILTER6["forward_to"]]),
@@ -606,6 +790,7 @@ def verify(backend: str) -> None:
     for v6, table, parent, args in checks:
         if not rule_exists(iptables(v6, table) + ["-C", parent, *args]):
             raise RuleError(f"missing dedicated jump: {' '.join(args)} in {table}/{parent}")
+    verify_parent_jumps()
     verify_private_chains()
     require_bridge(allow_missing=False)
     verify_interface_sysctls()

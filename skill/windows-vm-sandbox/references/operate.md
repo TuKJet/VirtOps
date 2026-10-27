@@ -12,6 +12,8 @@
 python3 scripts/host.py inspect --profile PROFILE.json
 ```
 
+只读升级结果中若 `network_update_required=true`，普通 `upgrade_runtime.py --apply` 会在写文件前阻断。网络脚本的校验期望和实际规则必须一起切换，使用[服务发布事务](published-services.md)完成，不能只替换守卫脚本导致现有 VM 被误暂停；即使服务列表不变，也可用原列表执行该事务来升级网络运行时。
+
 `inspect` 是只读操作，检查 libvirt 定义、UUID、资源、存储挂载、工具、监听端口、当前 VM 列表和门槛。输出 `matches_profile=false`、同名但 UUID 不同、root 未挂载或存在 recovery marker 时，停止，不执行生命周期命令。
 
 ## 用户可见的八个入口

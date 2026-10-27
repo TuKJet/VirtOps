@@ -19,6 +19,24 @@ import secrets
 import subprocess
 import tempfile
 from typing import Any, Iterator
+import importlib.util
+
+
+def _services(network: dict[str, Any]) -> list[dict[str, Any]]:
+    # Older rendered instances do not ship the optional policy module.  Keep
+    # their legacy network metadata usable when no extras were declared; a
+    # non-empty declaration still fails closed instead of silently dropping
+    # its boundary policy.
+    raw = network.get("published_services", [])
+    if raw is None or raw == []:
+        return []
+    path = Path(__file__).with_name("service_policy.py")
+    spec = importlib.util.spec_from_file_location("virtops_service_policy_registry", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("published service policy is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.normalize(network)
 
 
 REGISTRY_DIR = "registry"
@@ -101,6 +119,7 @@ def _metadata(data: dict[str, Any]) -> dict[str, Any]:
         "bridge": network["bridge"], "subnet": network["subnet"],
         "publish_ip": network["publish_ip"],
         "rdp_port": network["rdp_port"], "winrm_port": network["winrm_port"],
+        "published_services": _services(network),
         "owner": labels.get("owner", data.get("owner", "")),
         "purpose": labels.get("purpose", data.get("purpose", "")),
         "admin_user": windows["admin_user"],
@@ -120,6 +139,31 @@ def _valid_metadata(item: dict[str, Any]) -> None:
     for key in ("rdp_port", "winrm_port"):
         if not isinstance(item[key], int) or not 1 <= item[key] <= 65535:
             raise ValueError(f"invalid {key}")
+    services = item.get("published_services", [])
+    if not isinstance(services, list):
+        raise ValueError("invalid published_services")
+    if not services:
+        return
+    # Registry rows are an identity boundary, so do not trust a hand-edited
+    # service summary for port conflict checks.  Re-run the neutral policy
+    # canonicalizer using the registry's guest/publish data.  client_cidr is
+    # deliberately synthetic here: profile validation owns the actual client
+    # bound, while this check still rejects 0/0 sources and all other policy
+    # violations before a row can enter the registry.
+    try:
+        canonical = _services({
+            "subnet": item["subnet"],
+            "publish_ip": item["publish_ip"],
+            "rdp_port": item["rdp_port"],
+            "winrm_port": item["winrm_port"],
+            "client_cidr": "0.0.0.0/0",
+            "published_services": services,
+        })
+    except (KeyError, TypeError, ValueError, ipaddress.AddressValueError,
+            ipaddress.NetmaskValueError) as exc:
+        raise ValueError("invalid published service metadata") from exc
+    if services != canonical:
+        raise ValueError("published service metadata is not canonical")
 
 
 def _conflict(candidate: dict[str, Any], existing: dict[str, Any]) -> str | None:
@@ -130,9 +174,13 @@ def _conflict(candidate: dict[str, Any], existing: dict[str, Any]) -> str | None
     old_net = ipaddress.ip_network(existing["subnet"])
     if new_net.overlaps(old_net):
         return f"subnet overlaps reservation {existing.get('name')}"
-    for key in ("rdp_port", "winrm_port"):
-        if candidate[key] in {existing.get("rdp_port"), existing.get("winrm_port")}:
-            return f"published port {candidate[key]} already reserved by {existing.get('name')}"
+    existing_ports = {existing.get("rdp_port"), existing.get("winrm_port")}
+    existing_ports.update(s.get("publish_port") for s in existing.get("published_services", []) if isinstance(s, dict))
+    candidate_ports = {candidate.get("rdp_port"), candidate.get("winrm_port")}
+    candidate_ports.update(s.get("publish_port") for s in candidate.get("published_services", []) if isinstance(s, dict))
+    for port in candidate_ports:
+        if port in existing_ports:
+            return f"published port {port} already reserved by {existing.get('name')}"
     def cpu_ids(record):
         text=(record.get('resources') or {}).get('cpu_set')
         if not text:return set()
@@ -210,7 +258,7 @@ def update_owner(data: dict[str, Any]) -> dict[str, Any]:
     directory = registry_dir(host_root)
     candidate = _metadata(data)
     immutable = ("name", "uuid", "root", "bridge", "subnet", "publish_ip",
-                 "rdp_port", "winrm_port", "resources", "start_free_gib")
+                 "rdp_port", "winrm_port", "published_services", "resources", "start_free_gib")
     with _lock(directory):
         rows = _records(directory)
         match = next((pair for pair in rows if pair[1].get("name") == candidate["name"]), None)
@@ -218,7 +266,11 @@ def update_owner(data: dict[str, Any]) -> dict[str, Any]:
             raise FileNotFoundError(f"registry reservation not found: {candidate['name']}")
         path, existing = match
         for key in immutable:
-            if existing.get(key) != candidate.get(key):
+            # Rows written before optional published-services support omit the
+            # field; treat that legacy shape as the canonical empty list.
+            old_value = existing.get(key, []) if key == "published_services" else existing.get(key)
+            new_value = candidate.get(key, []) if key == "published_services" else candidate.get(key)
+            if old_value != new_value:
                 raise ValueError(f"registry immutable field changed: {key}")
         updated = dict(existing)
         for key in ("owner", "purpose", "admin_user"):

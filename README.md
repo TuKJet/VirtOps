@@ -31,6 +31,9 @@ python install.py --verify-installed
 - “删掉 alice-dev 的全部数据，按原规格从基础镜像重开。”
 - “复用这个 VM 的系统，把内存改为 64G，管理员改为 alice。”
 - “查看所有实例和总资源预算，上传脚本到指定实例执行。”
+- “给这台 VM 发布一个 MCP/HTTP 服务，自动分配独立端口，保留出站隔离。”
+
+额外 TCP 入站服务由每台实例的 `network.published_services` 声明。已有实例通过自带 `publish_services.py` 在线发布或撤销，默认使用宿主回环和 SSH 隧道，并从 18000–18999 自动选择未占用的端口。不同 VM 可以使用相同的内部应用端口；发布、维护、守卫与回滚使用同一配置，详见[受控入站服务](skill/windows-vm-sandbox/references/published-services.md)。
 
 未指定的关键资源、GPU、账户和入口由 agent 集中确认；名称/UUID 等实现细节可以生成。用户明确要求的范围内自动执行，只有缺输入、身份不符、容量不足或未知数据引用时停止。
 
