@@ -18,7 +18,7 @@ Windows 本机初始化从**用户自己的 Windows ISO** 开始：读取专业�
 
 这是开发预览分支：合约测试、模拟界面和编译验证不能替代专业版/企业版机器上的真实 DISM、OOBE、PowerShell Direct、Sysprep、两实例隔离和 RDP 验收。当前开发电脑是家庭版，未运行本机建 VM 验收。已有远端实例只完成了读取状态、服务和目录的验证，未为客户端开发修改生产 VM。
 
-客户端从 [Releases](https://github.com/TuKJet/VirtOps/releases) 下载。Windows 免安装使用选择 `windows-x64-portable.exe`，双击直接启动；需要安装向导和快捷方式时选择 `windows-x64-setup.exe`，也提供 MSI。便携 EXE 内嵌前端和管理脚本，需要系统已有 WebView2 Runtime；配置和 VM 数据保存在应用数据目录，删除 EXE 不会删除 VM。Linux 提供 `.deb` 和 `.AppImage`。每次推送 `main` 或 `codex/desktop-clients`，GitHub Actions 都会测试并编译；两个平台全部成功后，发布绑定该提交的独立预览 Release，附带便携 EXE、四个安装包和 `SHA256SUMS.txt`。上传后的文件大小和 SHA-256 校验通过才公开发布。PR 仅构建，不发布。Actions Artifacts 另外保留 14 天；Release 文件不会随 Artifact 到期而删除。构建不连接服务器，不包含运行配置或凭据，也不部署 VM。
+客户端从 [Releases](https://github.com/TuKJet/VirtOps/releases) 下载。Windows 选择 `windows-x64-portable.exe`，双击直接启动；Linux 选择 `.AppImage`，首次在文件属性中允许作为程序执行，之后双击启动。只提供这两种免安装客户端，不再生成 setup.exe、MSI、DEB。便携 EXE 内嵌前端和管理脚本，需要系统已有 WebView2 Runtime；配置和 VM 数据保存在应用数据目录，删除 EXE 不会删除 VM。每次推送 `main` 或 `codex/desktop-clients`，GitHub Actions 都会测试并编译；两个平台全部成功后，发布绑定该提交的独立预览 Release，附带两个客户端和 `SHA256SUMS.txt`。上传后的文件大小和 SHA-256 校验通过才公开发布。PR 仅构建，不发布。Actions Artifacts 另外保留 14 天；Release 文件不会随 Artifact 到期而删除。构建不连接服务器，不包含运行配置或凭据，也不部署 VM。
 
 详见 [构建与下载说明](desktop/BUILDING.md) 和 [界面规范](DESIGN.md)。
 

@@ -13,20 +13,20 @@ spec.loader.exec_module(release)
 
 class ReleaseTests(unittest.TestCase):
     def make_artifacts(self, root):
-        for name in ('virtops-desktop.exe', 'app-setup.exe', 'app.msi', 'app.deb', 'app.AppImage'):
+        for name in ('virtops-desktop.exe', 'app.AppImage'):
             (root / name).write_bytes(name.encode())
 
-    def test_missing_or_duplicate_platform_installer_is_rejected(self):
+    def test_missing_or_duplicate_platform_client_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_artifacts(root)
-            self.assertEqual(len(release.release_files(root)), 5)
-            (root / 'app.msi').unlink()
-            with self.assertRaisesRegex(ValueError, 'msi'):
+            self.assertEqual(len(release.release_files(root)), 2)
+            (root / 'app.AppImage').unlink()
+            with self.assertRaisesRegex(ValueError, 'AppImage'):
                 release.release_files(root)
-            (root / 'app.msi').write_bytes(b'installer')
-            (root / 'duplicate-setup.exe').write_bytes(b'installer')
-            with self.assertRaisesRegex(ValueError, 'setup.exe'):
+            (root / 'app.AppImage').write_bytes(b'client')
+            (root / 'duplicate.AppImage').write_bytes(b'client')
+            with self.assertRaisesRegex(ValueError, 'AppImage'):
                 release.release_files(root)
 
     def test_setup_cannot_replace_missing_portable_executable(self):
@@ -34,10 +34,23 @@ class ReleaseTests(unittest.TestCase):
             root = Path(directory)
             self.make_artifacts(root)
             (root / 'virtops-desktop.exe').unlink()
+            (root / 'app-setup.exe').write_bytes(b'installer')
             with self.assertRaisesRegex(ValueError, 'virtops-desktop.exe'):
                 release.release_files(root)
 
-    def test_prepare_keeps_portable_and_setup_payloads_distinct(self):
+    def test_installers_cannot_be_added_to_standalone_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_artifacts(root)
+            for name in ('app-setup.exe', 'app.msi', 'app.deb'):
+                with self.subTest(name=name):
+                    extra = root / name
+                    extra.write_bytes(b'installer')
+                    with self.assertRaisesRegex(ValueError, 'Unexpected release files'):
+                        release.release_files(root)
+                    extra.unlink()
+
+    def test_prepare_contains_only_two_clients_and_checksum(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifacts = root / 'artifacts'
@@ -50,11 +63,12 @@ class ReleaseTests(unittest.TestCase):
             }):
                 release.prepare(artifacts, output)
             portable = next(output.glob('*-portable.exe'))
-            setup = next(output.glob('*-setup.exe'))
             self.assertEqual(portable.read_bytes(), b'virtops-desktop.exe')
-            self.assertEqual(setup.read_bytes(), b'app-setup.exe')
+            self.assertEqual(next(output.glob('*.AppImage')).read_bytes(), b'app.AppImage')
             expected = json.loads((output / 'expected-assets.json').read_text())
-            self.assertEqual(len(expected), 6)
+            self.assertEqual({item['name'] for item in expected}, {
+                portable.name, next(output.glob('*.AppImage')).name, 'SHA256SUMS.txt',
+            })
             self.assertIn(portable.name, (output / 'SHA256SUMS.txt').read_text())
 
     def test_upload_verification_rejects_changed_bytes(self):
