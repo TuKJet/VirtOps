@@ -5,7 +5,8 @@ param(
     [string] $LocalPath,
     [string] $RemotePath,
     [int] $TimeoutSeconds = 300,
-    [ValidateSet('inspect','enable','disable')] [string] $ClipboardMode = 'inspect'
+    [ValidateSet('inspect','enable','disable')] [string] $ClipboardMode = 'inspect',
+    [switch] $LibraryOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -78,6 +79,7 @@ function New-WinRmSession($Profile) {
 function Invoke-Remote($Session, [scriptblock] $Script, [object[]] $RemoteArguments = @()) {
     return Invoke-Command -Session $Session -ScriptBlock $Script -ArgumentList $RemoteArguments -ErrorAction Stop
 }
+if ($LibraryOnly) { return }
 $profile = Read-Profile
 $session = $null
 try {

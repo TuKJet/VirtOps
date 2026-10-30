@@ -4,7 +4,25 @@
 
 “单向访问”指由批准的外部客户端发起连接，VM 可以在该连接中回复数据。TCP 请求、流式 MCP 响应和截图可以共用同一端口；这不授予 VM 主动连接外部模型、内网、DNS 或公网的权限，也不需要给 VM 添加默认网关。
 
-## 声明
+## Windows 统一入口
+
+日常由 agent 根据 VM 名选择已保存的客户端 profile，用户只需说“给 winvm01 开放 8001 入站端口”。入口运行在 Windows 客户端，复用 Python、PowerShell、OpenSSH、已知宿主密钥和现有 WinRM 凭据/固定证书：
+
+```powershell
+python scripts/service.py publish --profile C:/VirtOps/profiles/winvm01.json --guest-port 8001 --apply
+```
+
+去掉 `--apply` 仅检查。缺省服务 ID 为 `tcp-PORT`；如果同一 guest 端口已经发布，则复用其 ID 和宿主端口。也可指定 `--service-id` 和 `--local-port`。输出实际 `endpoint`、隧道 PID、是否复用以及操作记录。`service_client.host_scripts` 可覆盖远端脚本目录，默认 `HOST_ROOT/skill/VirtOps/skill/windows-vm-sandbox/scripts`。客户端连接地址可以不同于宿主发布地址；远端配置始终从权威 `root/instance.json` 读取并核验 UUID。
+
+工具执行：检查 Windows 防火墙配置启用、默认出站 Block 且无 IPv4/IPv6 默认路由 → 创建仅允许桥接网关访问指定 guest IP/端口的入站规则 → 调用现有宿主事务 → 建立仅绑定本机 127.0.0.1 的 SSH 转发。宿主守卫在变更前后精确验证规则，负责强制拒绝 VM 主动访问宿主、其他 VM 和外部网络；Windows 预检是额外防线，不代表默认策略能覆盖所有显式允许规则。不会改变默认路由、出站策略或应用权限。规则以 UUID/服务 ID 命名，只增删精确匹配的自有规则，已有应用规则不接管。
+
+本机默认优先使用宿主发布端口，已占用则自动选择空闲本机端口；不能抢占或终止其他进程。隧道记录保存在 `%LOCALAPPDATA%/VirtOps/tunnels`，绑定进程创建时间、可执行文件、参数和实例身份。重复执行复用匹配隧道，断线或注销后重跑同一入口恢复；当前不安装系统服务或开机任务。客户端需使用返回的本机端口；应用的 HTTP Host/Origin、路径和 Token 仍由应用配置决定。
+
+应用尚未监听时可先配置端口，返回 `configured`，不声称服务可用；已监听则验证宿主到 guest 的 TCP 路径。工具不解析或代办应用认证。操作记录写入 `%LOCALAPPDATA%/VirtOps/operations`，不记录密码/Token。失败回退本次新增内容，保留原有规则；SSH 中断导致提交结果未知时留下 `reconcile_required` 记录并要求重跑同一请求核对，不冒然删除规则。
+
+撤销使用 `python scripts/service.py remove --profile PROFILE.json --service-id ID --apply`：先撤销宿主入口，再停止校验为自有的隧道、删除自有 Windows 入站规则。后续清理失败不会重新开放端口；重跑同一命令会根据本机未完成记录，仅继续清理，实例地址变化则阻断并要求核对。其他客户端的隧道进程不会被跨机关闭，但宿主入口撤销后不能继续进入该服务。
+
+## 服务声明
 
 例如，将宿主回环 18000 发布到本实例 guest 8000，维护期间禁止访问：
 

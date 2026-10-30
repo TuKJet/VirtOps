@@ -43,6 +43,10 @@ GPU 选择独立于 CPU/RAM：`none` 使用 CPU/软件图形；整卡 passthroug
 
 复用已安装 VM 时不要复制完整的新 VM profile。使用 `assets/profiles/owner-rebuild.example.json` 作为 owner profile，只填写现有实例的 `name`/`uuid`、新管理员用户名、凭据句柄和 `data_policy`。它不改变 RAM、vCPU、GPU、网络或端口；这些字段若要改变，必须另走新 profile 的迁移/重建流程。`data_policy=clear` 只有在命令同时带 `--discard-data` 时才生效。
 
+## Windows 客户端服务入口
+
+Windows 统一服务入口 `scripts/service.py` 使用已有 `ssh`、`winrm_thumbprint` 和 `credentials.local_clixml`。可选 `service_client.host_scripts` 指向宿主的 Skill scripts 目录；省略时使用 `HOST_ROOT/skill/VirtOps/skill/windows-vm-sandbox/scripts`。客户端传输地址可按实际管理路径填写，实例身份和服务发布声明以宿主 `root/instance.json` 为准。`ssh.host_key_alias` 可选，用于复用已核验的宿主密钥别名；不会自动接受未知主机密钥。
+
 ## 同宿主登记
 
 初始化前先读写 `host_root/registry/<name>.json`（目录和登记文件由 root 创建，目录默认 0755、登记内容 root 可写），登记 name、UUID、root、bridge、subnet、RDP/WinRM 端口，即使 VM 还未启动也要占位。publish IP 可以共享，但 RDP/WinRM 端口必须唯一。新 profile 与登记表冲突时必须返回 `NAME_OR_PORT_CONFLICT` 或 `PORT_CONFLICT` 并停下，让用户选择新 name/端口；小模型不得自动猜端口或改 root。公共目录只保存展示所需字段，不保存密码或凭据路径。多台 VM 同时运行还要把各 VM 的 guest RAM、host_limit、磁盘预算和宿主已有任务合并核算；单台 cgroup 上限不能保证整机不 OOM。
