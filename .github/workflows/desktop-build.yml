@@ -183,7 +183,9 @@ jobs:
           if [ "$draft" = true ]; then
             gh release upload "$RELEASE_TAG" release/VirtOps-Desktop-* release/SHA256SUMS.txt --clobber
           fi
-          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > release/server-release.json
+          # Draft releases have no published tag yet; query their stable release ID.
+          release_id=$(gh release view "$RELEASE_TAG" --json databaseId --jq .databaseId)
+          gh api "repos/$GH_REPO/releases/$release_id" > release/server-release.json
           python desktop/scripts/prepare_release.py verify --output-dir release
           if [ "$draft" = true ]; then
             gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
