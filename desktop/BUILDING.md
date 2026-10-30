@@ -6,14 +6,16 @@ VirtOps Desktop 是一个 x64 桌面客户端。它调用确定性的 VirtOps �
 
 ## 支持范围
 
-- Windows：CI 产出 Windows x64 的 NSIS `setup.exe` 和 MSI 安装包。目标用户系统为 Windows 10/11 x64。
+- Windows：CI 产出 Windows x64 的单文件 `portable.exe`、NSIS `setup.exe` 和 MSI 安装包。目标用户系统为 Windows 10/11 x64。
 - Linux：CI 在 Ubuntu 22.04 x64 构建 `.deb` 与 `.AppImage`。`.deb` 面向 Debian/Ubuntu 系；AppImage 应先在目标发行版验证。
 - 当前所有自动构建产物都是**未签名**的测试产物。Windows 可能显示 SmartScreen/发布者未知提示；不要把它们当作正式发布包。
 - Windows 本机 VM 需要专业版/企业版、管理员权限和已启用的 Hyper-V；家庭版可作为远端客户端。当前开发机为家庭版，本机真实安装/启动/隔离未验收。Linux 本机目前管理已有 KVM 实例，不包含 ISO 制作向导。
 
-安装包入口是 [GitHub Releases](https://github.com/TuKJet/VirtOps/releases)。Windows 通常选择 `windows-x64-setup.exe`；其他格式按文件名选择。
+下载入口是 [GitHub Releases](https://github.com/TuKJet/VirtOps/releases)。Windows 免安装运行选择 `windows-x64-portable.exe`；需要安装向导和快捷方式时选择 `windows-x64-setup.exe`。
 
-GitHub Actions 每次推送 `main` 或 `codex/desktop-clients`、相应 pull request，以及手动触发时都会重新构建。推送和在这两个分支手动运行时，两个平台构建均成功才发布独立的预览 Release，标签包含版本和提交 SHA。先建立草稿，上传四个安装包及 `SHA256SUMS.txt`，核对 GitHub 记录的文件大小和 SHA-256 后公开。重复运行同一提交会核对既有文件，不覆盖已公开的 Release。PR 不发布，只有发布 job 具有 `contents: write`。
+便携版直接发布 Tauri release 构建的 `desktop/src-tauri/target/release/virtops-desktop.exe`，前端和 PowerShell 管理脚本已编入程序，无需旁边放置脚本目录，也不要求用户安装 Node.js、Python 或 Rust。系统必须已有 WebView2 Runtime；便携版不会运行依赖安装器。它仍使用应用数据目录保存配置、模板和实例；删除或移动 EXE 不会删除这些数据。
+
+GitHub Actions 每次推送 `main` 或 `codex/desktop-clients`、相应 pull request，以及手动触发时都会重新构建。推送和在这两个分支手动运行时，两个平台构建均成功才发布独立的预览 Release，标签包含版本和提交 SHA。先建立草稿，上传便携 EXE、四个安装包及 `SHA256SUMS.txt`，核对 GitHub 记录的文件大小和 SHA-256 后公开。缺少便携 EXE 时，即使存在 setup.exe 也会阻止发布。重复运行同一提交会核对既有文件，不覆盖已公开的 Release。PR 不发布，只有发布 job 具有 `contents: write`。
 
 工作流 artifact 仍保留 14 天用于排查；Release 安装包不受该期限影响。流程不部署 VM。预览版不会被标为正式 Latest Release，也不代表客户端内自动升级已实现。
 
@@ -53,9 +55,9 @@ npm run tauri -- build --bundles deb,appimage
 
 ## WebView2 的离线取舍
 
-当前 Windows 配置未固定 WebView2 的安装模式。发布前需按交付环境明确选择：
+便携 EXE 依赖系统已有的 WebView2，不包含运行库。以下模式只适用于 setup.exe/MSI 安装包；当前配置使用默认的 `downloadBootstrapper`：
 
-- `downloadBootstrapper` 是较小的默认模式，但首次安装需要联网。
+- `downloadBootstrapper` 是较小的默认模式，系统缺少 WebView2 时需要联网补装。
 - 隔离/离线现场使用 `offlineInstaller`；安装包约增加 127 MB。
 - `fixedRuntime` 也可完全离线，但约增加 180 MB，并将 WebView2 漏洞修复责任转给应用发布方。
 

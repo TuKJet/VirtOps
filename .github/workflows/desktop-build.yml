@@ -32,6 +32,7 @@ jobs:
             artifact: windows-x64
             bundles: nsis,msi
             artifact_paths: |
+              desktop/src-tauri/target/release/virtops-desktop.exe
               desktop/src-tauri/target/release/bundle/nsis/*.exe
               desktop/src-tauri/target/release/bundle/msi/*.msi
           - os: ubuntu-22.04
