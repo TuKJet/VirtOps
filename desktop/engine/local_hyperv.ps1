@@ -208,15 +208,20 @@ function Free-Subnet {
     }
     throw 'No non-conflicting local isolated subnet is available'
 }
-function Write-Unattend([string]$Disk, [string]$Name, [string]$User, [string]$Password) {
+function Write-Unattend([string]$Disk, [string]$Name, [string]$User, [string]$Password, [string]$Language = '') {
     $safeName = [Security.SecurityElement]::Escape($Name)
     $safeUser = [Security.SecurityElement]::Escape($User)
     $safePassword = [Security.SecurityElement]::Escape($Password)
+    $international=''
+    if($Language) {
+        $lang=[Security.SecurityElement]::Escape($Language)
+        $international="<component name=`"Microsoft-Windows-International-Core`" processorArchitecture=`"amd64`" publicKeyToken=`"31bf3856ad364e35`" language=`"neutral`" versionScope=`"nonSxS`"><InputLocale>$lang</InputLocale><SystemLocale>$lang</SystemLocale><UILanguage>$lang</UILanguage><UserLocale>$lang</UserLocale></component>"
+    }
     $xml = @"
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
  <settings pass="specialize"><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><ComputerName>$safeName</ComputerName></component></settings>
- <settings pass="oobeSystem"><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+ <settings pass="oobeSystem">$international<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
   <OOBE><HideEULAPage>true</HideEULAPage><HideOnlineAccountScreens>true</HideOnlineAccountScreens><HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE><ProtectYourPC>3</ProtectYourPC></OOBE>
   <UserAccounts><LocalAccounts><LocalAccount xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add"><Name>$safeUser</Name><DisplayName>$safeUser</DisplayName><Group>Administrators</Group><Password><Value>$safePassword</Value><PlainText>true</PlainText></Password></LocalAccount></LocalAccounts></UserAccounts>
  </component></settings>
@@ -291,7 +296,7 @@ function Create-InstanceBody([string]$Store, $Parameters) {
     $size=[int](Value $Parameters 'disk_gib' ([math]::Ceiling($image.virtualBytes/1GB)))
     if([long]$size*1GB -lt $image.virtualBytes){throw 'Instance disk cannot be smaller than its base image'}
     if([long]$size*1GB -gt $image.virtualBytes){Resize-VHD -Path $disk -SizeBytes ([long]$size*1GB)}
-    Write-Unattend $disk $name $user $password
+    Write-Unattend $disk $name $user $password ([string](Value $image 'language' ''))
     $switch=New-VMSwitch -Name $switchName -SwitchType Internal
     $record.switch_id=$switch.Id.ToString();$script:CreatedSwitch=$switch
     Save-Json $recordPath $record
@@ -518,7 +523,7 @@ try {
         $mutex=[Threading.Mutex]::new($false,'Global\VirtOps-HyperV-Local')
         $locked=$false
         try {
-            $locked=$mutex.WaitOne(0)
+            try {$locked=$mutex.WaitOne(0)} catch [Threading.AbandonedMutexException] {$locked=$true}
             if(-not $locked){throw 'Another local Hyper-V operation is running'}
             switch($action) {
                 'list_images' {$result=@{status='ok';images=@(List-Images $store)}}

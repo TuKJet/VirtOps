@@ -46,8 +46,12 @@ test('engine ISO and image payloads use the real protocol shapes', () => {
 
 test('single-service publish results are reduced into the existing service list', () => {
   const previous = { services: [{ id: 'old', guest_port: 8000 }] };
-  const published = { status: 'published', service: { id: 'new', guest_port: 8001 }, endpoint: 'http://127.0.0.1:18001' };
+  const published = { status: 'ready', service: { id: 'new', guest_port: 8001 }, endpoint: '127.0.0.1:18001' };
   const merged = mergeServiceResult(previous, published, 'publish');
   assert.deepEqual(merged.services, [previous.services[0], published.service]);
   assert.equal(mergeServiceResult(merged, { status: 'removed', service_id: 'new' }, 'remove_service').services.length, 1);
+  assert.equal(mergeServiceResult(merged, { status: 'removed', service: published.service }, 'remove_service').services.length, 1);
+  assert.equal(mergeServiceResult(merged, published, 'publish').services.length, 2);
+  assert.equal(mergeServiceResult(merged, { status: 'cleanup_required', service: published.service, host_closed: true }, 'remove_service').services.length, 1);
+  assert.equal(completedLocalAction('create', { status: 'provisioning' }), false);
 });
