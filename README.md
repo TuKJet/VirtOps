@@ -18,7 +18,7 @@ Windows 本机初始化从**用户自己的 Windows ISO** 开始：读取专业�
 
 这是开发预览分支：合约测试、模拟界面和编译验证不能替代专业版/企业版机器上的真实 DISM、OOBE、PowerShell Direct、Sysprep、两实例隔离和 RDP 验收。当前开发电脑是家庭版，未运行本机建 VM 验收。已有远端实例只完成了读取状态、服务和目录的验证，未为客户端开发修改生产 VM。
 
-GitHub Actions 会在 `main`、`codex/desktop-clients` 的提交及相关 PR 后自动测试和编译，生成 Windows x64 `.exe/.msi` 与 Linux x64 `.deb/.AppImage`。在对应运行的 **Artifacts** 下载；产物保留 14 天。构建不连接服务器，不包含运行配置或凭据，也不自动部署 VM。
+安装包从 [Releases](https://github.com/TuKJet/VirtOps/releases) 下载。Windows 优先选择 `windows-x64-setup.exe`，也提供 MSI；Linux 提供 `.deb` 和 `.AppImage`。每次推送 `main` 或 `codex/desktop-clients`，GitHub Actions 都会测试并编译；两个平台全部成功后，发布绑定该提交的独立预览 Release，附带四个安装包和 `SHA256SUMS.txt`。上传后的文件大小和 SHA-256 校验通过才公开发布。PR 仅构建，不发布。Actions Artifacts 另外保留 14 天；Release 安装包不会随 Artifact 到期而删除。构建不连接服务器，不包含运行配置或凭据，也不部署 VM。
 
 详见 [构建与下载说明](desktop/BUILDING.md) 和 [界面规范](DESIGN.md)。
 

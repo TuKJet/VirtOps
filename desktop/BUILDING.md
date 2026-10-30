@@ -11,7 +11,11 @@ VirtOps Desktop 是一个 x64 桌面客户端。它调用确定性的 VirtOps �
 - 当前所有自动构建产物都是**未签名**的测试产物。Windows 可能显示 SmartScreen/发布者未知提示；不要把它们当作正式发布包。
 - Windows 本机 VM 需要专业版/企业版、管理员权限和已启用的 Hyper-V；家庭版可作为远端客户端。当前开发机为家庭版，本机真实安装/启动/隔离未验收。Linux 本机目前管理已有 KVM 实例，不包含 ISO 制作向导。
 
-GitHub Actions 每次推送 `main` 或 `codex/desktop-clients`、相应 pull request，以及手动触发时都会重新构建。构建只上传工作流 artifact，不创建 GitHub Release、不部署 VM。下载 artifact 通常需要登录 GitHub 并具有该仓库的读取权限；产物保留 14 天。
+安装包入口是 [GitHub Releases](https://github.com/TuKJet/VirtOps/releases)。Windows 通常选择 `windows-x64-setup.exe`；其他格式按文件名选择。
+
+GitHub Actions 每次推送 `main` 或 `codex/desktop-clients`、相应 pull request，以及手动触发时都会重新构建。推送和在这两个分支手动运行时，两个平台构建均成功才发布独立的预览 Release，标签包含版本和提交 SHA。先建立草稿，上传四个安装包及 `SHA256SUMS.txt`，核对 GitHub 记录的文件大小和 SHA-256 后公开。重复运行同一提交会核对既有文件，不覆盖已公开的 Release。PR 不发布，只有发布 job 具有 `contents: write`。
+
+工作流 artifact 仍保留 14 天用于排查；Release 安装包不受该期限影响。流程不部署 VM。预览版不会被标为正式 Latest Release，也不代表客户端内自动升级已实现。
 
 ## 本地前置条件
 

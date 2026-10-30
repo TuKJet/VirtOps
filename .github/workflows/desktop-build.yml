@@ -11,8 +11,7 @@ on:
       - codex/desktop-clients
   workflow_dispatch:
 
-# This workflow only reads source and uploads short-lived workflow artifacts.
-# It never creates releases, uploads release assets, or deploys to a VM.
+# Build jobs are read-only. Only the post-build release job can publish assets.
 permissions:
   contents: read
 
@@ -115,8 +114,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Test desktop RPC boundaries
-        run: python -m unittest discover -s tests -p test_desktop_remote.py -v
+      - name: Test desktop RPC and release boundaries
+        run: python -m unittest discover -s tests -p "test_desktop_*.py" -v
 
       - name: Test Windows engine contracts (PowerShell 5.1)
         if: runner.os == 'Windows'
@@ -144,3 +143,49 @@ jobs:
           path: ${{ matrix.artifact_paths }}
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish desktop preview
+    needs: build
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/desktop-clients')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download this commit's installers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: virtops-desktop-*-${{ github.sha }}
+          path: release-artifacts
+
+      - name: Check complete installer set and prepare release
+        id: prepare
+        run: python desktop/scripts/prepare_release.py prepare --artifacts-dir release-artifacts --output-dir release
+
+      - name: Publish verified preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.prepare.outputs.title }}
+        run: |
+          set -euo pipefail
+          draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)
+          if [ -z "$draft" ]; then
+            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --title "$RELEASE_TITLE" --notes-file release/RELEASE_NOTES.md --draft --prerelease --latest=false
+            draft=true
+          fi
+          if [ "$draft" = true ]; then
+            gh release upload "$RELEASE_TAG" release/VirtOps-Desktop-* release/SHA256SUMS.txt --clobber
+          fi
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > release/server-release.json
+          python desktop/scripts/prepare_release.py verify --output-dir release
+          if [ "$draft" = true ]; then
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          fi
+          gh release view "$RELEASE_TAG" --json url --jq .url
