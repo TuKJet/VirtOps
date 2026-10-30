@@ -17,5 +17,12 @@ artifacts/
 *.esd
 *.qcow2
 *.raw
+*.vhd
+*.vhdx
+*.avhdx
 *.store
 *.zip
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

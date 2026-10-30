@@ -1,5 +1,29 @@
 # VirtOps
 
+## 桌面客户端：Windows / Linux
+
+`desktop/` 是 Tauri 2 + Rust + WebView 桌面客户端，使用固定代码执行操作，不需要 AI 服务。默认面向只有一台工作站的用户，远端服务器是可选连接。
+
+Windows 本机初始化从**用户自己的 Windows ISO** 开始：读取专业版/企业版索引 → DISM 安装到新建 VHDX → 无网络的专用 Hyper-V 构建 VM → 清理临时账户并 Sysprep → 校验、封存本地只读模板。之后从模板创建独立磁盘、用户、密码、TPM 和隔离网络的 VM，删除实例后可再次创建。不会上传 ISO、模板、虚拟磁盘或用户数据。模板默认保存在本机应用数据目录的 `hyperv/images`，实例在 `hyperv/instances`；已有 VHDX 导入仅为引擎高级入口。
+
+| 使用方式 | 当前桌面能力 |
+|---|---|
+| Windows 10/11 专业版、企业版本机 | Hyper-V 环境检查、ISO 构建模板、创建/确认删除实例、管理已登记实例 |
+| Linux 本机 | 导入本机已有 VirtOps/KVM 实例 profile 并管理；首次 ISO 安装仍使用已有 Skill 流程 |
+| Windows / Linux 连接服务器 | SSH 管理 Linux/KVM 上已有 VirtOps 实例，受控 guest 操作使用 QEMU Guest Agent |
+
+实例管理包括状态、启停、资源、系统 RDP 客户端、多个 TCP 入站端口发布/撤销、目录查询、阻断日志。端口发布同时处理 guest 防火墙、宿主入口和客户端回环转发，保留出站隔离；TCP 连通不等于 HTTP/MCP 认证成功。应用及 MCP 的安装、Token 和功能仍属于外部应用。账户变更、文件上传下载、Linux 模板制作等完整向导尚未覆盖。
+
+本机 Hyper-V 要求已启用系统功能、管理员运行及足够空闲资源，客户端不自动启用功能或重启电脑。远端模式需导入实例 JSON，并已有 OpenSSH、已知宿主密钥和 SSH 认证。配置不存明文密码；Windows 本机实例凭据用 DPAPI 加密。任务按 VM 串行执行，本机 Hyper-V 另有跨进程互斥；退出客户端会关闭其管理的转发。
+
+这是开发预览分支：合约测试、模拟界面和编译验证不能替代专业版/企业版机器上的真实 DISM、OOBE、PowerShell Direct、Sysprep、两实例隔离和 RDP 验收。当前开发电脑是家庭版，未运行本机建 VM 验收。已有远端实例只完成了读取状态、服务和目录的验证，未为客户端开发修改生产 VM。
+
+GitHub Actions 会在 `main`、`codex/desktop-clients` 的提交及相关 PR 后自动测试和编译，生成 Windows x64 `.exe/.msi` 与 Linux x64 `.deb/.AppImage`。在对应运行的 **Artifacts** 下载；产物保留 14 天。构建不连接服务器，不包含运行配置或凭据，也不自动部署 VM。
+
+详见 [构建与下载说明](desktop/BUILDING.md) 和 [界面规范](DESIGN.md)。
+
+## Skill
+
 给 AI agent 使用的 Windows/KVM Skill：**基础系统只制作一次，多台 VM 复用系统镜像，每台使用独立账户、密码、磁盘和网络；需要干净环境时删除实例，再从基础镜像开出新的。**
 
 资源调整、账户修改、镜像制作、实例创建和删除都由工程自带命令完成，不要求 agent 在用户工作目录临时编写运维脚本。
