@@ -44,8 +44,16 @@ def main(request):
         result = {'status': 'ready' if service else 'absent', 'service': service, 'expected_before': fingerprint(current),
                   'guest_ip': data['network']['guest_ip'], 'bridge_ip': data['network']['bridge_ip']}
         if action == 'probe':
-            if service['access'] != 'host-loopback': raise ValueError('expected loopback service')
-            with socket.create_connection(('127.0.0.1', service['publish_port']), timeout=5):
+            if service['access'] == 'host-loopback':
+                target = ('127.0.0.1', service['publish_port'])
+                result['probe_scope'] = 'host-loopback publication'
+            else:
+                # A PREROUTING network publication is not traversed when the
+                # host connects to its own external address. Probe the guest
+                # endpoint directly instead; client reachability is separate.
+                target = (data['network']['guest_ip'], service['guest_port'])
+                result['probe_scope'] = 'host-to-guest TCP (network publication backend)'
+            with socket.create_connection(target, timeout=5):
                 result['host_to_guest_tcp'] = True
         return result
     if action not in {'plan', 'apply', 'remove'}:
@@ -58,12 +66,13 @@ def main(request):
         desired, auto = publisher._resolve_cli_services(profile_path, None, None, None, service_id)
     else:
         desired, auto = publisher._resolve_cli_services(profile_path, service_id, guest_port,
-                                                       request.get('publish_port'), None)
+                                                       request.get('publish_port'), None,
+                                                       request.get('access'), request.get('allowed_sources'))
     if request.get('expected_before') is not None and request['expected_before'] != fingerprint(current):
         raise RuntimeError('service list changed since preflight; rerun the request')
     existing = next((s for s in current if s['id'] == service_id), None)
-    if existing and action != 'remove' and (existing['guest_port'] != guest_port or existing['access'] != 'host-loopback'):
-        raise ValueError('existing service differs; use a new service ID or explicitly remove it first')
+    if existing and action != 'remove' and existing['guest_port'] != guest_port:
+        raise ValueError('existing service guest port differs; use a new service ID or explicitly remove it first')
     plan = publisher._prepare_services(profile_path, desired)
     plan['auto_publish_port'] = auto
     helper = root / 'scripts/lib' / (data['name'] + '_network.py')
@@ -74,6 +83,11 @@ def main(request):
     result = {'status': 'ready', 'service': service, 'expected_before': fingerprint(current),
               'guest_ip': data['network']['guest_ip'], 'bridge_ip': data['network']['bridge_ip'],
               'vm_state': plan['evidence']['vm_state'], 'existing': existing is not None}
+    if (existing and action != 'remove' and service.get('access') == 'network'
+            and existing.get('access', 'host-loopback') == 'host-loopback'):
+        # The Windows client uses this only to retire its owned legacy SSH
+        # tunnel after the network publication commits.
+        result['previous_service'] = existing
     if action != 'plan':
         if desired == current and not plan['evidence'].get('network_update_required'):
             result.update(status='unchanged', backup=None)

@@ -754,6 +754,15 @@ mod commands {
             stop_handle(&forward.handle);
         }
     }
+    fn direct_endpoint_reachable(endpoint: &str) -> bool {
+        endpoint
+            .parse::<SocketAddr>()
+            .ok()
+            .and_then(|address| {
+                TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3)).ok()
+            })
+            .is_some()
+    }
     fn ensure_forward(
         profile: &Value,
         profile_id: &str,
@@ -1391,6 +1400,54 @@ mod commands {
                             .get("provider")
                             .and_then(Value::as_str)
                             .unwrap_or("ssh");
+                        // A network publication is already reachable on the
+                        // host's declared publish_ip:publish_port.  Do not
+                        // add a second localhost SSH hop; that would hide the
+                        // actual endpoint and make direct LAN/overlay access
+                        // impossible.  The host transaction and guest
+                        // firewall remain the controls for this path.
+                        if service.get("access").and_then(Value::as_str) == Some("network") {
+                            stop_forward(
+                                &forwards,
+                                &forward_key(
+                                    &profile_id,
+                                    service.get("id").and_then(Value::as_str).unwrap_or(""),
+                                ),
+                            );
+                            if let Some(object) = result.as_object_mut() {
+                                let endpoint = object
+                                    .get("endpoint")
+                                    .cloned()
+                                    .or_else(|| {
+                                        let ip =
+                                            service.get("publish_ip").and_then(Value::as_str)?;
+                                        let port =
+                                            service.get("publish_port").and_then(Value::as_u64)?;
+                                        Some(json!(format!("{ip}:{port}")))
+                                    })
+                                    .ok_or_else(|| {
+                                        AppError::Operation(
+                                            "network publication returned no direct endpoint"
+                                                .into(),
+                                        )
+                                    })?;
+                                let endpoint_text = endpoint.as_str().ok_or_else(|| {
+                                    AppError::Operation(
+                                        "network publication endpoint must be text".into(),
+                                    )
+                                })?;
+                                let direct_reachable = direct_endpoint_reachable(endpoint_text);
+                                object
+                                    .insert("tcp_direct_reachable".into(), json!(direct_reachable));
+                                if !direct_reachable {
+                                    object.insert("status".into(), json!("configured"));
+                                }
+                                object.insert("endpoint".into(), endpoint);
+                                object.remove("local_target");
+                                object.remove("tunnel");
+                            }
+                            return Ok(result);
+                        }
                         let tunnel = match if provider == "hyperv-local" || provider == "kvm-local"
                         {
                             let target = result
@@ -1644,6 +1701,11 @@ mod commands {
                 .any(|w| w == ["-o".to_string(), "ExitOnForwardFailure=yes".to_string()]));
             assert!(args.iter().any(|x| x == "127.0.0.1:18123:127.0.0.1:18000"));
             assert!(!args.iter().any(|x| x == "-R" || x == "-g"));
+        }
+
+        #[test]
+        fn invalid_direct_endpoint_is_not_reported_reachable() {
+            assert!(!direct_endpoint_reachable("not-an-endpoint"));
         }
 
         #[test]

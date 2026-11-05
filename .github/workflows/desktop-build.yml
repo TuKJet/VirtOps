@@ -108,6 +108,11 @@ jobs:
       - name: Test desktop RPC and release boundaries
         run: python -m unittest discover -s tests -p "test_desktop_*.py" -v
 
+      - name: Test direct service publication and isolation policy
+        run: |
+          python -m unittest discover -s tests -p "test_service*.py" -v
+          python -m unittest discover -s tests -p "test_publish*.py" -v
+
       - name: Test Windows engine contracts (PowerShell 5.1)
         if: runner.os == 'Windows'
         shell: powershell

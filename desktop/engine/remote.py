@@ -134,6 +134,23 @@ def save_removal(path, data):
         temporary.unlink(missing_ok=True)
 
 
+def service_endpoint(service):
+    """Return the endpoint declared by the host publication policy.
+
+    Network services are reachable on the host's published address directly;
+    they must not be represented as a localhost tunnel endpoint.  Loopback
+    services retain their declared loopback address for callers that provide a
+    local relay themselves.
+    """
+    address = service.get('publish_ip')
+    port = service.get('publish_port')
+    if not isinstance(address, str) or not address or any(c in address for c in '\r\n '):
+        raise ValueError('published service address is invalid')
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError('published service port is invalid')
+    return f'{address}:{port}'
+
+
 def services(data, root, package, action, parameters):
     adapter = module(package / 'service_remote.py', 'desktop_services')
     base = {key: data[key] for key in ('name', 'uuid', 'root')}
@@ -174,12 +191,21 @@ def services(data, root, package, action, parameters):
     port = parameters.get('guest_port')
     if type(port) is not int or not 1 <= port <= 65535:
         raise ValueError('Guest port must be 1..65535')
-    plan = host('plan', guest_port=port, service_id=service_id)
+    host_options = {'guest_port': port, 'service_id': service_id}
+    for key in ('access', 'publish_port', 'allowed_sources'):
+        if key in parameters:
+            host_options[key] = parameters[key]
+    plan = host('plan', **host_options)
     service = plan['service']
     guest = guest_firewall(qga, data, service, 'ensure')
     try:
-        result = host('apply', guest_port=port, service_id=service['id'],
-                      publish_port=service['publish_port'], expected_before=plan['expected_before'])
+        apply_options = {'guest_port': port, 'service_id': service['id'],
+                         'publish_port': service['publish_port'],
+                         'expected_before': plan['expected_before']}
+        for key in ('access', 'allowed_sources'):
+            if key in parameters:
+                apply_options[key] = parameters[key]
+        result = host('apply', **apply_options)
     except Exception:
         # Reconcile authoritative state before removing the exact guest rule.
         # A failed rollback must never be mistaken for an absent publication.
@@ -193,10 +219,14 @@ def services(data, root, package, action, parameters):
             reachable = True
     except OSError:
         pass
-    return {'status': 'ready' if reachable else 'configured', 'service': service,
-            'guest': guest, 'host': result, 'tcp_reachable': reachable,
-            'local_target': f"127.0.0.1:{service['publish_port']}",
-            'note': 'TCP reachability does not verify HTTP/MCP authentication.'}
+    response = {'status': 'ready' if reachable else 'configured', 'service': service,
+                'guest': guest, 'host': result, 'tcp_reachable': reachable,
+                'host_to_guest_tcp': reachable,
+                'endpoint': service_endpoint(service),
+                'note': 'Host-to-guest TCP reachability does not verify client-to-host access or HTTP/MCP authentication.'}
+    if service.get('access') == 'host-loopback':
+        response['local_target'] = service_endpoint(service)
+    return response
 
 
 def dispatch(request):

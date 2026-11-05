@@ -3,7 +3,7 @@ import io
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 path = Path(__file__).resolve().parents[1] / 'desktop/engine/remote.py'
 spec = importlib.util.spec_from_file_location('desktop_rpc', path)
@@ -44,6 +44,51 @@ class DesktopRemoteTests(unittest.TestCase):
         with patch.object(rpc, 'trusted_context', return_value=context):
             with self.assertRaisesRegex(ValueError, 'positive integers'):
                 rpc.dispatch({'action': 'configure', 'profile': {}, 'parameters': {'vcpus': True}})
+
+    def test_network_service_endpoint_is_the_declared_server_address(self):
+        self.assertEqual(
+            rpc.service_endpoint({
+                'access': 'network', 'publish_ip': '192.168.25.5',
+                'publish_port': 18002,
+            }),
+            '192.168.25.5:18002',
+        )
+
+    def test_service_endpoint_rejects_untrusted_address_text(self):
+        with self.assertRaisesRegex(ValueError, 'address'):
+            rpc.service_endpoint({
+                'access': 'network', 'publish_ip': '192.168.25.5\\r\\nHost: evil',
+                'publish_port': 18002,
+            })
+
+    def test_network_publish_returns_direct_endpoint_and_host_probe_scope(self):
+        data = {
+            'name': 'winvm02', 'uuid': '17028aba-61b4-4d43-b666-df88f120bd7f',
+            'root': '/home/vm_run/instances/winvm02',
+            'network': {'guest_ip': '172.30.62.2', 'bridge_ip': '172.30.62.1'},
+        }
+        service = {
+            'id': 'tcp-8001', 'guest_port': 8001, 'publish_ip': '192.168.25.5',
+            'publish_port': 18002, 'access': 'network',
+        }
+        adapter = Mock()
+        adapter.main.side_effect = [
+            {'status': 'ready', 'service': service, 'expected_before': 'old'},
+            {'status': 'applied', 'backup': '/var/lib/virtops/backup'},
+        ]
+        qga = Mock()
+        qga.powershell.return_value = '{"status":"ok","created":true,"present":true,"listener":true}'
+        with patch.object(rpc, 'module', return_value=adapter), \
+                patch.object(rpc, 'qga_for', return_value=qga), \
+                patch.object(rpc.socket, 'create_connection') as connect:
+            connect.return_value.__enter__.return_value = Mock()
+            result = rpc.services(data, Path('/home/vm_run/instances/winvm02'), Path('/opt/virtops'),
+                                  'publish', {'guest_port': 8001, 'service_id': 'tcp-8001',
+                                              'access': 'network', 'publish_port': 18002})
+        self.assertEqual(result['endpoint'], '192.168.25.5:18002')
+        self.assertTrue(result['host_to_guest_tcp'])
+        self.assertNotIn('local_target', result)
+        self.assertEqual(adapter.main.call_args_list[0].args[0]['access'], 'network')
 
 
 if __name__ == '__main__':

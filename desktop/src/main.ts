@@ -354,17 +354,26 @@ function renderResources(body: HTMLElement, profile: Profile): void { const form
     return;
 } runJob('configure', { vcpus, memory_gib: memory, host_limit_gib: Number(data.get('host_limit_gib') || 0) || undefined, stop: (stop.querySelector('input') as HTMLInputElement).checked, restart: (restart.querySelector('input') as HTMLInputElement).checked }); })); body.append(form); const result = currentResult(); if (result)
     renderResult(body, result); }
-function renderServices(body: HTMLElement): void { const form = node('form', 'resource-form') as HTMLFormElement; form.append(field('VM 内 TCP 端口', 'guest_port', '8001'), field('服务 ID（可选）', 'service_id', '')); form.append(button('发布端口', 'primary', () => { const data = new FormData(form); const port = Number(data.get('guest_port')); if (!validPort(port)) {
+function renderServices(body: HTMLElement): void { const profile = selectedProfile(); const remote = Boolean(profile && !isLocalProfile(profile)); const form = node('form', 'resource-form') as HTMLFormElement; form.append(field('VM 内 TCP 端口', 'guest_port', '8001'), field('服务 ID（可选）', 'service_id', '')); let access: HTMLSelectElement | undefined; if (remote) {
+    const accessField = node('label', 'field'); accessField.append(node('span', undefined, '访问方式')); access = document.createElement('select'); access.name = 'access'; const preserve = node('option', undefined, '按现有配置（新服务默认直连）') as HTMLOptionElement; preserve.value = ''; const direct = node('option', undefined, '服务器直连') as HTMLOptionElement; direct.value = 'network'; const loopback = node('option', undefined, '本机回环 / SSH 隧道') as HTMLOptionElement; loopback.value = 'host-loopback'; access.append(preserve, direct, loopback); accessField.append(access); form.append(accessField, field('服务器发布端口（可选）', 'publish_port', '')); }
+form.append(button('发布端口', 'primary', () => { const data = new FormData(form); const port = Number(data.get('guest_port')); if (!validPort(port)) {
     state.error = '端口必须为 1-65535 的整数';
     render();
     return;
-} runJob('publish', { guest_port: port, service_id: data.get('service_id') || undefined }); })); body.append(form); const result = currentResult(); const services = Array.isArray(result?.services) ? result.services as Array<Record<string, unknown>> : []; for (const service of services) {
+} const publishText = String(data.get('publish_port') ?? '').trim(); const publishPort = publishText ? Number(publishText) : undefined; if (publishPort !== undefined && !validPort(publishPort)) {
+    state.error = '服务器发布端口必须为 1-65535 的整数';
+    render();
+    return;
+} const serviceId = String(data.get('service_id') ?? '').trim(); const existingServices = Array.isArray(currentResult()?.services) ? currentResult()!.services as Array<Record<string, unknown>> : []; const existing = existingServices.find((item) => (serviceId && String(item.id ?? '') === serviceId) || Number(item.guest_port) === port); const payload: Record<string, unknown> = { guest_port: port, service_id: serviceId || undefined }; if (access && access.value)
+    payload.access = access.value; if (!remote && profile?.provider === 'kvm-local' && !existing)
+    payload.access = 'host-loopback'; if (publishPort !== undefined)
+    payload.publish_port = publishPort; runJob('publish', payload); })); body.append(form); const result = currentResult(); const services = Array.isArray(result?.services) ? result.services as Array<Record<string, unknown>> : []; for (const service of services) {
     const row = node('div', 'service-row');
     row.append(node('strong', undefined, String(service.id ?? 'service')), node('span', 'muted', `VM ${service.guest_port ?? '?'} → ${service.publish_port ?? '?'}`), button('撤销', 'danger', () => { if (confirm(`确认撤销 ${String(service.id)}？`))
         runJob('remove_service', { service_id: service.id }); }));
     body.append(row);
 } if (result?.endpoint)
-    body.append(node('div', 'notice success', `本机访问地址：${String(result.endpoint)}`)); if (!services.length)
+    body.append(node('div', 'notice success', `${result.service && (result.service as Record<string, unknown>).access === 'network' ? '服务器直连地址' : '本机访问地址'}：${String(result.endpoint)}`)); if (!services.length)
     body.append(node('div', 'empty compact', '还没有受控服务端口')); }
 function renderFiles(body: HTMLElement): void { const form = node('form', 'resource-form') as HTMLFormElement; form.append(field('Windows 路径', 'path', 'C:\\'), button('读取文件列表', 'primary', () => { const data = new FormData(form); const path = String(data.get('path') ?? '').trim(); if (!path) {
     state.error = '请输入 Windows 路径';

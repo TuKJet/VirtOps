@@ -12,7 +12,7 @@ Windows 本机初始化从**用户自己的 Windows ISO** 开始：读取专业�
 | Linux 本机 | 导入本机已有 VirtOps/KVM 实例 profile 并管理；首次 ISO 安装仍使用已有 Skill 流程 |
 | Windows / Linux 连接服务器 | SSH 管理 Linux/KVM 上已有 VirtOps 实例，受控 guest 操作使用 QEMU Guest Agent |
 
-实例管理包括状态、启停、资源、系统 RDP 客户端、多个 TCP 入站端口发布/撤销、目录查询、阻断日志。端口发布同时处理 guest 防火墙、宿主入口和客户端回环转发，保留出站隔离；TCP 连通不等于 HTTP/MCP 认证成功。应用及 MCP 的安装、Token 和功能仍属于外部应用。账户变更、文件上传下载、Linux 模板制作等完整向导尚未覆盖。
+实例管理包括状态、启停、资源、系统 RDP 客户端、多个 TCP 入站端口发布/撤销、目录查询、阻断日志。远端新服务默认通过服务器 IP:端口直连，统一配置 guest 防火墙与来源受限的宿主入口，保留出站隔离；无需操作电脑持续转发。旧回环服务保留兼容，显式切换后才迁移。TCP 连通不等于 HTTP/MCP 认证成功。应用及 MCP 的安装、Token 和功能仍属于外部应用。账户变更、文件上传下载、Linux 模板制作等完整向导尚未覆盖。
 
 本机 Hyper-V 要求已启用系统功能、管理员运行及足够空闲资源，客户端不自动启用功能或重启电脑。远端模式需导入实例 JSON，并已有 OpenSSH、已知宿主密钥和 SSH 认证。配置不存明文密码；Windows 本机实例凭据用 DPAPI 加密。任务按 VM 串行执行，本机 Hyper-V 另有跨进程互斥；退出客户端会关闭其管理的转发。
 
@@ -57,7 +57,7 @@ python install.py --verify-installed
 - “查看所有实例和总资源预算，上传脚本到指定实例执行。”
 - “给这台 VM 发布一个 MCP/HTTP 服务，自动分配独立端口，保留出站隔离。”
 
-额外 TCP 入站服务由每台实例的 `network.published_services` 声明。Windows 客户端使用 `service.py publish --profile PROFILE.json --guest-port PORT --apply`，自动配置 Windows 入站规则、宿主发布和本机 SSH 转发。不同 VM 可以使用相同的内部应用端口，宿主端口自动避让；维护、守卫与回滚使用同一配置，详见[受控入站服务](skill/windows-vm-sandbox/references/published-services.md)。
+额外 TCP 入站服务由每台实例的 `network.published_services` 声明。Windows 客户端使用 `service.py publish --profile PROFILE.json --guest-port PORT --apply`，自动配置 Windows 入站规则与服务器直连入口；可用 `--publish-port` 指定服务器端口。不同 VM 可以使用相同的内部应用端口，宿主端口自动避让；维护、守卫与回滚使用同一配置。旧回环服务可显式用 `--access network` 迁移，`--access host-loopback` 则保留可选 SSH 转发方式，详见[受控入站服务](skill/windows-vm-sandbox/references/published-services.md)。
 
 未指定的关键资源、GPU、账户和入口由 agent 集中确认；名称/UUID 等实现细节可以生成。用户明确要求的范围内自动执行，只有缺输入、身份不符、容量不足或未知数据引用时停止。
 

@@ -9,12 +9,30 @@ import re
 import shutil
 import subprocess
 import sys
+import socket
 import uuid
 import contextlib
 
 from profile import load
 
 HERE = Path(__file__).resolve().parent
+
+
+def tcp_probe(host, port, timeout=5):
+    """Return whether the client can complete a TCP connect to an endpoint."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def validate_cli_options(action, *, access=None, publish_port=None,
+                         allowed_sources=None, local_port=0):
+    """Reject options that cannot have meaning for the selected action."""
+    if action == 'remove' and (access is not None or publish_port is not None
+                               or allowed_sources is not None or local_port):
+        raise ValueError('access, publish-port, allowed-source and local-port are only valid for publish')
 
 
 def json_command(arguments, *, source=None, timeout=180):
@@ -89,12 +107,25 @@ class Operations:
         return None
 
 
-def publish(ops, *, guest_port, service_id=None, apply=False, local_port=0, record=lambda **fields: None):
-    plan = ops.host('plan', guest_port=guest_port, service_id=service_id)
+def publish(ops, *, guest_port, service_id=None, access=None, publish_port=None,
+            allowed_sources=None, apply=False, local_port=0, record=lambda **fields: None):
+    host_options = {'guest_port': guest_port, 'service_id': service_id}
+    if access is not None:
+        host_options['access'] = access
+    if publish_port is not None:
+        host_options['publish_port'] = publish_port
+    if allowed_sources is not None:
+        host_options['allowed_sources'] = allowed_sources
+    plan = ops.host('plan', **host_options)
     service = plan['service']
     guest = ops.guest('inspect', service, plan)
+    if service.get('access', 'host-loopback') == 'network' and local_port:
+        raise ValueError('local-port is only valid for host-loopback services')
     if not apply:
-        return {'status': 'ready', 'mode': 'check', 'host': plan, 'guest': guest}
+        result = {'status': 'ready', 'mode': 'check', 'host': plan, 'guest': guest}
+        if service.get('access', 'host-loopback') == 'network':
+            result['endpoint'] = service['publish_ip'] + ':' + str(service['publish_port'])
+        return result
     record(phase='prepared', plan=plan)
     created_guest = False
     host_result = None
@@ -105,12 +136,47 @@ def publish(ops, *, guest_port, service_id=None, apply=False, local_port=0, reco
         created_guest = bool(guest.get('created'))
         record(phase='guest_ready', guest=guest)
         phase = 'host'
-        host_result = ops.host('apply', guest_port=guest_port, service_id=service['id'],
-                               publish_port=service['publish_port'], expected_before=plan['expected_before'])
+        apply_options = dict(host_options)
+        apply_options.update(service_id=service['id'], publish_port=service['publish_port'],
+                             expected_before=plan['expected_before'])
+        host_result = ops.host('apply', **apply_options)
         record(phase='host_ready', host=host_result)
-        phase = 'tunnel'
+        phase = 'access'
+        tunnel = None
+        network_probe = None
+        warnings = []
+        if service.get('access', 'host-loopback') == 'network':
+            # A network publication is already reachable at the host's
+            # declared publish_ip.  Do not add a client-side SSH hop.
+            endpoint_host = service['publish_ip']
+            endpoint_port = service['publish_port']
+            if guest.get('listener'):
+                network_probe = tcp_probe(endpoint_host, endpoint_port)
+            previous = plan.get('previous_service')
+            if previous and previous.get('access', 'host-loopback') == 'host-loopback':
+                try:
+                    ops.tunnel('stop', previous)
+                except Exception as error:
+                    warnings.append('old loopback tunnel cleanup failed: ' + str(error))
+            status = 'ready' if guest.get('listener') and network_probe else 'configured'
+            if not guest.get('listener'):
+                note = 'Port configured; guest application is not listening yet'
+            elif not network_probe:
+                note = 'Guest listener reported, but client could not reach the published endpoint yet'
+            else:
+                note = ('TCP transport configured and client endpoint is reachable; application '
+                        'authentication/protocol is application-owned')
+            result = {'status': status, 'mode': 'apply', 'service': service,
+                      'guest': guest, 'host': host_result,
+                      'endpoint': endpoint_host + ':' + str(endpoint_port),
+                      'network_probe': network_probe, 'note': note}
+            if warnings:
+                result['warnings'] = warnings
+            record(phase='complete', network_probe=network_probe, warnings=warnings)
+            return result
         if guest.get('listener'):
             ops.host('probe', service_id=service['id'])
+        phase = 'tunnel'
         tunnel = ops.tunnel('start', service, local_port)
         record(phase='complete', tunnel=tunnel)
         return {'status': 'ready' if guest.get('listener') else 'configured', 'mode': 'apply', 'service': service, 'tunnel': tunnel,
@@ -150,21 +216,29 @@ def remove(ops, *, service_id, apply=False, record=lambda **fields: None):
         plan = recovery
     service = plan['service']
     if not apply:
-        return {'status': 'ready', 'mode': 'check', 'service': service,
-                'tunnel': ops.tunnel('status', service), 'guest': ops.guest('inspect', service, plan)}
+        result = {'status': 'ready', 'mode': 'check', 'service': service,
+                  'guest': ops.guest('inspect', service, plan)}
+        if service.get('access', 'host-loopback') == 'host-loopback':
+            result['tunnel'] = ops.tunnel('status', service)
+        return result
     record(phase='removing', plan=plan)
     host = ({'status': 'absent'} if host_absent else
             ops.host('remove', service_id=service_id, expected_before=plan['expected_before']))
     # Close the host gate first.  A cleanup failure must not republish a revoked service.
     record(phase='host_closed', host=host)
+    tunnel = None
     try:
-        tunnel = ops.tunnel('stop', service)
+        if service.get('access', 'host-loopback') == 'host-loopback':
+            tunnel = ops.tunnel('stop', service)
         guest = ops.guest('remove', service, plan)
     except Exception as exc:
         record(phase='cleanup_failed', error=str(exc))
         raise RuntimeError('host publication is closed; rerun the same removal to finish cleanup: ' + str(exc)) from exc
     record(phase='complete', tunnel=tunnel, guest=guest)
-    return {'status': 'removed', 'host': host, 'tunnel': tunnel, 'guest': guest}
+    result = {'status': 'removed', 'host': host, 'guest': guest}
+    if tunnel is not None:
+        result['tunnel'] = tunnel
+    return result
 
 
 @contextlib.contextmanager
@@ -193,6 +267,9 @@ def main():
     parser.add_argument('--profile', type=Path, required=True)
     parser.add_argument('--guest-port', type=int)
     parser.add_argument('--service-id')
+    parser.add_argument('--access', choices=['network', 'host-loopback'])
+    parser.add_argument('--publish-port', type=int)
+    parser.add_argument('--allowed-source', action='append', dest='allowed_sources')
     parser.add_argument('--local-port', type=int, default=0)
     parser.add_argument('--state-dir', type=Path)
     parser.add_argument('--apply', action='store_true')
@@ -204,6 +281,10 @@ def main():
             raise ValueError('publish requires --guest-port 1..65535')
         if args.action == 'remove' and not args.service_id: raise ValueError('remove requires --service-id')
         if not 0 <= args.local_port <= 65535: raise ValueError('invalid local port')
+        if args.publish_port is not None and not 1 <= args.publish_port <= 65535:
+            raise ValueError('invalid publish port')
+        validate_cli_options(args.action, access=args.access, publish_port=args.publish_port,
+                             allowed_sources=args.allowed_sources, local_port=args.local_port)
         data = load(args.profile)
         state = args.state_dir or Path(os.environ['LOCALAPPDATA']) / 'VirtOps'
         ops = Operations(data, args.profile.resolve(), state)
@@ -221,6 +302,8 @@ def main():
         with client_lock(state, data['uuid'], args.apply):
             if args.action == 'publish':
                 result = publish(ops, guest_port=args.guest_port, service_id=args.service_id,
+                                 access=args.access, publish_port=args.publish_port,
+                                 allowed_sources=args.allowed_sources,
                                  local_port=args.local_port, apply=args.apply, record=record)
             else:
                 result = remove(ops, service_id=args.service_id, apply=args.apply, record=record)

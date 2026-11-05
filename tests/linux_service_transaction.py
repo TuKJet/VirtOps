@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -170,6 +171,61 @@ class LinuxServiceTransactionTests(unittest.TestCase):
             self.assertEqual(self._get(18000), 200)
             with self.assertRaises((urllib.error.URLError, OSError, TimeoutError)):
                 self._get(18002)
+        self.assertEqual(self._beta_rules(), self.beta_before)
+
+    def test_direct_migration_keeps_egress_blocked_at_each_rule_commit_and_rollback(self):
+        """Probe real packets between table commits in a disposable namespace."""
+        from linux_published_services import run
+        desired = [{"id": "cad-mcp", "publish_port": 18000, "guest_port": 8000,
+                    "access": "network", "publish_ip": "192.0.2.5",
+                    "allowed_sources": ["198.51.100.0/24"]}]
+        inspect, domain, lock = self._plan()
+        checks = []
+        original_restore = publish._restore_payload
+
+        def drop_packets():
+            # Include temporary maintenance chains and NAT rules as well as
+            # stable rules. Count only this disposable instance's drops.
+            rules = _run(["iptables-save", "-c"]).stdout
+            return sum(int(match.group(1)) for line in rules.splitlines()
+                       if " -j DROP" in line
+                       and (match := re.match(r"\[(\d+):\d+\] -A ALPHA_\S+ ", line)))
+
+        def check_egress():
+            before = drop_packets()
+            # Only this fake guest receives a default route. This makes the
+            # firewall, rather than missing routing, prove the egress block.
+            run(["python3", "-c",
+                 "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); "
+                 "s.sendto(b'isolated-test',('1.1.1.1',53))"], namespace=self.lab.guest.pid)
+            after = drop_packets()
+            self.assertGreater(after, before, "guest egress must hit DROP after every table commit")
+            checks.append(after - before)
+
+        def restore_and_probe(payload):
+            original_restore(payload)
+            check_egress()
+
+        # Give the fake host an outbound route too: without one Linux can
+        # reject routing before the FORWARD guard is reached.
+        run(["ip", "link", "add", "vops-uplink", "type", "dummy"])
+        run(["ip", "link", "set", "vops-uplink", "up"])
+        run(["ip", "route", "add", "1.1.1.1/32", "dev", "vops-uplink"])
+        run(["ip", "route", "add", "default", "via", "172.30.61.1"], namespace=self.lab.guest.pid)
+        try:
+            with inspect, domain, lock:
+                plan = publish._prepare_services(self.profile_path, desired)
+                check_egress()
+                with patch.object(publish, "_restore_payload", side_effect=restore_and_probe):
+                    result = publish.apply_plan(plan)
+                    self.assertEqual(result["status"], "applied")
+                    self.assertEqual(result["services"][0]["access"], "network")
+                    publish.rollback(Path(result["backup"]), self.profile_path)
+                self.assertGreaterEqual(len(checks), 9)
+                self.assertEqual(self._get(18000), 200)
+        finally:
+            run(["ip", "route", "del", "default"], check=False, namespace=self.lab.guest.pid)
+            run(["ip", "link", "del", "vops-uplink"], check=False)
         self.assertEqual(self._beta_rules(), self.beta_before)
 
 

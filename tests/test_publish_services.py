@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -183,8 +184,28 @@ class PublishServiceTests(unittest.TestCase):
             services, port = publish._resolve_cli_services(self.profile_path, "cad-mcp", 8000, None, None)
         self.assertEqual(port, 18001)
         self.assertEqual(services[0]["publish_port"], 18001)
-        self.assertEqual(services[0]["publish_ip"], "127.0.0.1")
+        self.assertEqual(services[0]["publish_ip"], self.old["network"]["publish_ip"])
+        self.assertEqual(services[0]["access"], "network")
         self.assertFalse(services[0]["allow_during_maintenance"])
+
+    def test_cli_add_service_network_uses_declared_host_ip_and_client_cidr(self):
+        with patch.object(publish.profile, "load", return_value=self.old), \
+             patch.object(publish, "_policy", side_effect=lambda network: network.get("published_services", [])), \
+             patch.object(publish, "_reserved_ports", return_value={13389, 15986, 18000}):
+            services, port = publish._resolve_cli_services(
+                self.profile_path, "mcp", 8001, None, None, "network")
+        self.assertEqual(port, 18001)
+        self.assertEqual(services[0]["publish_ip"], self.old["network"]["publish_ip"])
+        self.assertEqual(services[0]["allowed_sources"], [self.old["network"]["client_cidr"]])
+        self.assertEqual(services[0]["access"], "network")
+
+    def test_cli_network_allows_explicit_bounded_sources(self):
+        with patch.object(publish.profile, "load", return_value=self.old), \
+             patch.object(publish, "_policy", side_effect=lambda network: network.get("published_services", [])), \
+             patch.object(publish, "_reserved_ports", return_value={13389, 15986}):
+            services, _ = publish._resolve_cli_services(
+                self.profile_path, "mcp", 8001, 18001, None, "network", ["192.168.20.50/32"])
+        self.assertEqual(services[0]["allowed_sources"], ["192.168.20.50/32"])
 
     def test_cli_add_existing_id_reuses_port_without_auto_allocation(self):
         existing = copy.deepcopy(self.old)
@@ -196,10 +217,85 @@ class PublishServiceTests(unittest.TestCase):
         }]
         with patch.object(publish.profile, "load", return_value=existing), \
              patch.object(publish, "_policy", side_effect=lambda network: network.get("published_services", [])):
-            services, port = publish._resolve_cli_services(self.profile_path, "cad-mcp", 9000, None, None)
+            with self.assertRaisesRegex(ValueError, "guest port differs"):
+                publish._resolve_cli_services(self.profile_path, "cad-mcp", 9000, None, None)
+
+    def test_existing_service_without_options_preserves_policy(self):
+        existing = copy.deepcopy(self.old)
+        existing["network"]["published_services"] = [{
+            "id": "cad-mcp", "protocol": "tcp", "publish_ip": self.old["network"]["publish_ip"],
+            "publish_port": 18042, "guest_port": 8000,
+            "allowed_sources": ["192.168.20.50/32"], "access": "network",
+            "snat_to_bridge": True, "allow_during_maintenance": False,
+        }]
+        with patch.object(publish.profile, "load", return_value=existing):
+            services, port = publish._resolve_cli_services(self.profile_path, "cad-mcp", 8000, None, None)
         self.assertIsNone(port)
         self.assertEqual(services[0]["publish_port"], 18042)
-        self.assertEqual(services[0]["guest_port"], 9000)
+        self.assertEqual(services[0]["allowed_sources"], ["192.168.20.50/32"])
+
+    def test_explicit_access_migrates_existing_loopback_and_reverse(self):
+        existing = copy.deepcopy(self.old)
+        existing["network"]["published_services"] = [{
+            "id": "cad-mcp", "protocol": "tcp", "publish_ip": "127.0.0.1",
+            "publish_port": 18042, "guest_port": 8000,
+            "allowed_sources": ["127.0.0.1/32"], "access": "host-loopback",
+            "snat_to_bridge": True, "allow_during_maintenance": True,
+        }]
+        with patch.object(publish.profile, "load", return_value=existing):
+            services, _ = publish._resolve_cli_services(self.profile_path, "cad-mcp", 8000, None, None, "network")
+        self.assertEqual(services[0]["access"], "network")
+        self.assertEqual(services[0]["publish_port"], 18042)
+        self.assertFalse(services[0]["allow_during_maintenance"])
+        existing["network"]["published_services"] = services
+        with patch.object(publish.profile, "load", return_value=existing):
+            services, _ = publish._resolve_cli_services(self.profile_path, "cad-mcp", 8000, None, None, "host-loopback")
+        self.assertEqual(services[0]["access"], "host-loopback")
+        self.assertEqual(services[0]["allowed_sources"], ["127.0.0.1/32"])
+
+    def test_invalid_sources_are_rejected(self):
+        with patch.object(publish.profile, "load", return_value=self.old):
+            with self.assertRaisesRegex(ValueError, "at least one"):
+                publish._resolve_cli_services(self.profile_path, "mcp", 8001, 18001, None, "network", [])
+            with self.assertRaisesRegex(ValueError, "inside network.client_cidr"):
+                publish._resolve_cli_services(self.profile_path, "mcp", 8001, 18001, None, "network", ["10.0.0.0/8"])
+
+    def test_cli_entrypoint_omitted_access_preserves_existing_loopback_policy(self):
+        existing = copy.deepcopy(self.old)
+        existing["network"]["published_services"] = [{
+            "id": "cad-mcp", "protocol": "tcp", "publish_ip": "127.0.0.1",
+            "publish_port": 18042, "guest_port": 8000,
+            "allowed_sources": ["127.0.0.1/32"], "access": "host-loopback",
+            "snat_to_bridge": True, "allow_during_maintenance": True,
+        }]
+        captured = {}
+        fake_plan = {"evidence": {"vm_state": "running"}, "changes": [],
+                     "desired": {"network": {"published_services": []}}}
+        with patch.object(publish.profile, "load", return_value=existing), \
+             patch.object(publish, "_prepare_services", side_effect=lambda _path, services: captured.update(services=services) or fake_plan), \
+             patch.object(sys, "argv", ["publish_services.py", "--profile", str(self.profile_path),
+                                         "--add-service", "cad-mcp", "--guest-port", "8000"]):
+            self.assertEqual(publish.main(), 0)
+        self.assertEqual(captured["services"][0]["access"], "host-loopback")
+        self.assertTrue(captured["services"][0]["allow_during_maintenance"])
+
+    def test_apply_style_repeat_preserves_order_and_maintenance(self):
+        existing = copy.deepcopy(self.old)
+        existing["network"]["published_services"] = [
+            {"id": "first", "protocol": "tcp", "publish_ip": self.old["network"]["publish_ip"],
+             "publish_port": 18040, "guest_port": 8040, "allowed_sources": ["192.168.20.50/32"],
+             "access": "network", "snat_to_bridge": True, "allow_during_maintenance": False},
+            {"id": "cad-mcp", "protocol": "tcp", "publish_ip": "127.0.0.1",
+             "publish_port": 18042, "guest_port": 8000, "allowed_sources": ["127.0.0.1/32"],
+             "access": "host-loopback", "snat_to_bridge": True, "allow_during_maintenance": True},
+            {"id": "last", "protocol": "tcp", "publish_ip": self.old["network"]["publish_ip"],
+             "publish_port": 18043, "guest_port": 8043, "allowed_sources": ["192.168.20.50/32"],
+             "access": "network", "snat_to_bridge": True, "allow_during_maintenance": False},
+        ]
+        with patch.object(publish.profile, "load", return_value=existing):
+            services, _ = publish._resolve_cli_services(self.profile_path, "cad-mcp", 8000, 18042, None)
+        self.assertEqual([item["id"] for item in services], ["first", "cad-mcp", "last"])
+        self.assertTrue(services[1]["allow_during_maintenance"])
 
     def test_restore_rule_quote_is_iptables_compatible(self):
         line = publish._quote(["-A", "ALPHA_OUTPUT", "-j", "LOG", "--log-prefix", "ALPHA DROP output "])

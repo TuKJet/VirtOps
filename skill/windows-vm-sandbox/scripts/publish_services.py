@@ -766,7 +766,9 @@ def _reserved_ports(data: dict[str, Any]) -> set[int]:
 
 
 def _resolve_cli_services(profile_path: Path, add_id: str | None, guest_port: int | None,
-                          publish_port: int | None, remove_id: str | None) -> tuple[list[dict[str, Any]], int | None]:
+                          publish_port: int | None, remove_id: str | None,
+                          access: str | None = None,
+                          allowed_sources: list[str] | None = None) -> tuple[list[dict[str, Any]], int | None]:
     data = profile.load(profile_path, new=False)
     current = _policy(data["network"])
     if remove_id:
@@ -775,9 +777,25 @@ def _resolve_cli_services(profile_path: Path, add_id: str | None, guest_port: in
             raise ValueError(f"published service does not exist: {remove_id}")
         return [item for item in current if item["id"] != remove_id], None
     assert add_id is not None and guest_port is not None
-    if any(item["id"] == add_id for item in current):
+    existing = next((item for item in current if item["id"] == add_id), None)
+    existing_index = next((index for index, item in enumerate(current) if item["id"] == add_id), None)
+    preserve_maintenance = False
+    if existing:
+        if guest_port != existing["guest_port"]:
+            raise ValueError("existing service guest port differs; use a new service ID or explicitly remove it first")
+        # An unqualified repeat is idempotent and preserves the complete
+        # existing policy, including a narrow source list and maintenance flag.
+        if access is None and publish_port is None and allowed_sources is None:
+            return current, None
         if publish_port is None:
-            publish_port = next(item["publish_port"] for item in current if item["id"] == add_id)
+            publish_port = existing["publish_port"]
+        access = access or existing["access"]
+        preserve_maintenance = access == existing["access"]
+        if allowed_sources is None:
+            if access == existing["access"]:
+                allowed_sources = list(existing["allowed_sources"])
+            elif access == "network":
+                allowed_sources = [data["network"]["client_cidr"]]
         current = [item for item in current if item["id"] != add_id]
     auto = publish_port is None
     if auto:
@@ -785,11 +803,33 @@ def _resolve_cli_services(profile_path: Path, add_id: str | None, guest_port: in
         publish_port = next((port for port in range(18000, 19000) if port not in reserved), None)
         if publish_port is None:
             raise RuntimeError("no free published port in 18000..18999")
-    service = {"id": add_id, "protocol": "tcp", "publish_ip": "127.0.0.1",
+    # New CLI publications are network-facing by default so callers can use
+    # the host's declared publish_ip directly.  Existing services were handled
+    # above, so omitting options there remains a true no-op.
+    access = access or "network"
+    if access not in {"host-loopback", "network"}:
+        raise ValueError("access must be host-loopback or network")
+    if access == "network":
+        publish_ip = data["network"]["publish_ip"]
+        if allowed_sources is None:
+            allowed_sources = [data["network"]["client_cidr"]]
+        if not allowed_sources:
+            raise ValueError("network service needs at least one allowed source")
+        sources = allowed_sources
+    else:
+        publish_ip = "127.0.0.1"
+        if allowed_sources is not None and allowed_sources != ["127.0.0.1/32"]:
+            raise ValueError("host-loopback service must allow only 127.0.0.1/32")
+        sources = ["127.0.0.1/32"]
+    service = {"id": add_id, "protocol": "tcp", "publish_ip": publish_ip,
                "publish_port": publish_port, "guest_port": guest_port,
-               "allowed_sources": ["127.0.0.1/32"], "access": "host-loopback",
-               "snat_to_bridge": True, "allow_during_maintenance": False}
-    current.append(service)
+               "allowed_sources": sources, "access": access,
+               "snat_to_bridge": True,
+               "allow_during_maintenance": bool(existing.get("allow_during_maintenance", False)) if existing and preserve_maintenance else False}
+    if existing_index is None:
+        current.append(service)
+    else:
+        current.insert(existing_index, service)
     return _policy({**data["network"], "published_services": current}), publish_port if auto else None
 
 
@@ -815,6 +855,10 @@ def main() -> int:
     group.add_argument("--remove-service", metavar="ID")
     parser.add_argument("--guest-port", type=int)
     parser.add_argument("--publish-port", type=int)
+    # None is meaningful: a repeated existing service preserves its policy;
+    # the resolver defaults only genuinely new services to network access.
+    parser.add_argument("--access", choices=("network", "host-loopback"))
+    parser.add_argument("--allowed-source", action="append", dest="allowed_sources")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--rollback", type=Path)
     args = parser.parse_args()
@@ -829,14 +873,15 @@ def main() -> int:
         if args.add_service or args.remove_service:
             if args.add_service and args.guest_port is None:
                 raise ValueError("--guest-port is required with --add-service")
-            if args.remove_service and (args.guest_port is not None or args.publish_port is not None):
+            if args.remove_service and (args.guest_port is not None or args.publish_port is not None or args.allowed_sources or args.access is not None):
                 raise ValueError("port options are only valid with --add-service")
             services, auto_port = _resolve_cli_services(args.profile.absolute(), args.add_service,
-                                                        args.guest_port, args.publish_port, args.remove_service)
+                                                        args.guest_port, args.publish_port, args.remove_service,
+                                                        args.access, args.allowed_sources)
             plan = _prepare_services(args.profile.absolute(), services)
             plan["auto_publish_port"] = auto_port
         elif args.services:
-            if args.guest_port is not None or args.publish_port is not None:
+            if args.guest_port is not None or args.publish_port is not None or args.allowed_sources or args.access is not None:
                 raise ValueError("port options require --add-service")
             plan = prepare(args.profile.absolute(), args.services.absolute())
         else:

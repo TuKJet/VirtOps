@@ -12,19 +12,21 @@
 python scripts/service.py publish --profile C:/VirtOps/profiles/winvm01.json --guest-port 8001 --apply
 ```
 
-去掉 `--apply` 仅检查。缺省服务 ID 为 `tcp-PORT`；如果同一 guest 端口已经发布，则复用其 ID 和宿主端口。也可指定 `--service-id` 和 `--local-port`。输出实际 `endpoint`、隧道 PID、是否复用以及操作记录。`service_client.host_scripts` 可覆盖远端脚本目录，默认 `HOST_ROOT/skill/VirtOps/skill/windows-vm-sandbox/scripts`。客户端连接地址可以不同于宿主发布地址；远端配置始终从权威 `root/instance.json` 读取并核验 UUID。
+去掉 `--apply` 仅检查。缺省服务 ID 为 `tcp-PORT`；如果同一 guest 端口已经发布，则复用其 ID、宿主端口及访问模式。新服务默认 `network` 直连模式，发布地址取权威 `network.publish_ip`，默认来源取 `network.client_cidr`；用 `--allowed-source CIDR` 可缩小范围，可重复传入。用 `--publish-port` 指定服务器端口，用 `--service-id` 指定名称。输出实际服务器 `endpoint` 与验证结果，不需要客户端持续运行或备用电脑转发。`service_client.host_scripts` 可覆盖远端脚本目录，默认 `HOST_ROOT/skill/VirtOps/skill/windows-vm-sandbox/scripts`。SSH 管理地址可以不同于发布地址；远端配置始终从权威 `root/instance.json` 读取并核验 UUID。
 
-工具执行：检查 Windows 防火墙配置启用、默认出站 Block 且无 IPv4/IPv6 默认路由 → 创建仅允许桥接网关访问指定 guest IP/端口的入站规则 → 调用现有宿主事务 → 建立仅绑定本机 127.0.0.1 的 SSH 转发。宿主守卫在变更前后精确验证规则，负责强制拒绝 VM 主动访问宿主、其他 VM 和外部网络；Windows 预检是额外防线，不代表默认策略能覆盖所有显式允许规则。不会改变默认路由、出站策略或应用权限。规则以 UUID/服务 ID 命名，只增删精确匹配的自有规则，已有应用规则不接管。
+工具执行：检查 Windows 防火墙配置启用、默认出站 Block 且无 IPv4/IPv6 默认路由 → 创建仅允许桥接网关访问指定 guest IP/端口的入站规则 → 调用现有宿主事务 → 返回并探测服务器入口。直连模式不启动本机 SSH 转发。宿主守卫在变更前后精确验证规则，负责强制拒绝 VM 主动访问宿主、其他 VM 和外部网络；Windows 预检是额外防线，不代表默认策略能覆盖所有显式允许规则。不会改变默认路由、出站策略或应用权限。规则以 UUID/服务 ID 命名，只增删精确匹配的自有规则，已有应用规则不接管。
 
-本机默认优先使用宿主发布端口，已占用则自动选择空闲本机端口；不能抢占或终止其他进程。隧道记录保存在 `%LOCALAPPDATA%/VirtOps/tunnels`，绑定进程创建时间、可执行文件、参数和实例身份。重复执行复用匹配隧道，断线或注销后重跑同一入口恢复；当前不安装系统服务或开机任务。客户端需使用返回的本机端口；应用的 HTTP Host/Origin、路径和 Token 仍由应用配置决定。
+只有明确需要回环访问时才使用 `--access host-loopback`，此模式仍自动建立 SSH 隧道，可用 `--local-port` 指定本机端口。隧道记录保存在 `%LOCALAPPDATA%/VirtOps/tunnels`，绑定进程创建时间、可执行文件、参数和实例身份；不会抢占其他进程。直连模式不依赖这些记录。应用的 HTTP Host/Origin、路径和 Token 仍由应用配置决定。
 
-应用尚未监听时可先配置端口，返回 `configured`，不声称服务可用；已监听则验证宿主到 guest 的 TCP 路径。工具不解析或代办应用认证。操作记录写入 `%LOCALAPPDATA%/VirtOps/operations`，不记录密码/Token。失败回退本次新增内容，保留原有规则；SSH 中断导致提交结果未知时留下 `reconcile_required` 记录并要求重跑同一请求核对，不冒然删除规则。
+旧回环服务不会因升级或未指定模式的重试而自动扩大暴露范围。明确切换使用同一条命令加 `--access network`，例如 `service.py publish --profile PROFILE.json --guest-port 8000 --publish-port 18000 --access network --apply`。它在原事务内迁移同一服务，不先删除再重建，不停止网络守卫。服务器已有独立代理占用端口时应报告冲突，不能自动停止未知代理或影响既有其他地址入口。迁移成功后只清理校验为自有的旧本机隧道；清理失败应报告，不回退已成功的直连配置。
+
+应用尚未监听时可先配置端口，返回 `configured`，不声称服务可用。宿主到 guest 与客户端到服务器入口是不同的验证层次，需分别报告；直连入口必须从批准的客户端测试，宿主本机连接自己的发布 IP 不能代替 PREROUTING 路径验收。TCP 可通后仍需另验 HTTP/MCP，工具不解析或代办应用认证。操作记录写入 `%LOCALAPPDATA%/VirtOps/operations`，不记录密码/Token。事务失败回退本次新增内容，保留原有规则；SSH 中断导致提交结果未知时留下 `reconcile_required` 记录并要求重跑同一请求核对，不冒然删除规则。
 
 撤销使用 `python scripts/service.py remove --profile PROFILE.json --service-id ID --apply`：先撤销宿主入口，再停止校验为自有的隧道、删除自有 Windows 入站规则。后续清理失败不会重新开放端口；重跑同一命令会根据本机未完成记录，仅继续清理，实例地址变化则阻断并要求核对。其他客户端的隧道进程不会被跨机关闭，但宿主入口撤销后不能继续进入该服务。
 
 ## 服务声明
 
-例如，将宿主回环 18000 发布到本实例 guest 8000，维护期间禁止访问：
+例如，将服务器组网地址的 18000 发布到本实例 guest 8000，限组网来源且维护期间禁止访问（地址需换成该实例的权威配置）：
 
 ```json
 {
@@ -33,11 +35,11 @@ python scripts/service.py publish --profile C:/VirtOps/profiles/winvm01.json --g
       {
         "id": "cad-mcp",
         "protocol": "tcp",
-        "publish_ip": "127.0.0.1",
+        "publish_ip": "192.168.25.5",
         "publish_port": 18000,
         "guest_port": 8000,
-        "allowed_sources": ["127.0.0.1/32"],
-        "access": "host-loopback",
+        "allowed_sources": ["192.168.25.0/24"],
+        "access": "network",
         "snat_to_bridge": true,
         "allow_during_maintenance": false
       }
@@ -60,7 +62,7 @@ python scripts/service.py publish --profile C:/VirtOps/profiles/winvm01.json --g
 
 在已核对的 Linux 宿主工程目录运行，使用权威 profile。客户端专用的地址覆盖文件不能代替宿主实例配置。将完整的额外服务数组保存到工程外的 `SERVICES.json`，该文件不包含 Token：
 
-常用回环服务不必先写 JSON 文件。按服务 ID 添加，内部端口由应用决定：
+常用直连服务不必先写 JSON 文件。按服务 ID 添加，内部端口由应用决定：
 
 ```sh
 sudo python3 skill/windows-vm-sandbox/scripts/publish_services.py \
@@ -69,7 +71,7 @@ sudo python3 skill/windows-vm-sandbox/scripts/publish_services.py \
   --profile /path/to/instance.json --add-service cad-mcp --guest-port 8000 --apply
 ```
 
-省略 `--publish-port` 时，在 18000–18999 中选取未登记、未监听的端口；已存在的同 ID 服务复用原端口。不同 VM 可以复用 guest 8000，但宿主发布端口各自独立。检查结果会展示实际选择；提交时在锁内复查，发生抢占就阻断，不悄悄更换端口。可用 `--publish-port` 指定明确端口；`--remove-service ID` 移除单项服务。HTTP 路径、认证和截图格式不由端口分配器决定。
+省略 `--publish-port` 时，在 18000–18999 中选取未登记、未监听的端口；已存在的同 ID 服务复用原端口和模式，显式 `--access network` 可原位迁移旧回环声明。不同 VM 可以复用 guest 8000，但宿主发布端口各自独立。检查结果会展示实际选择；提交时在锁内复查，发生抢占就阻断，不悄悄更换端口。可用 `--publish-port` 指定明确端口，`--allowed-source` 缩小批准来源；`--remove-service ID` 移除单项服务。HTTP 路径、认证和截图格式不由端口分配器决定。
 
 需要完整来源或维护策略时，使用 JSON 数组入口：
 
@@ -96,7 +98,7 @@ sudo python3 skill/windows-vm-sandbox/scripts/publish_services.py \
 ## 验收
 
 - 核对 guest 服务已监听、Windows 防火墙来源限制正确；MCP initialize、tools/list 和预览取回分别验证，端口可连不代表 COM 可用。
-- 回环发布经 SSH 隧道可访问，物理/组网地址的同端口不能直接访问；未批准来源继续拒绝。
+- 直连发布从批准客户端通过服务器 IP:端口访问，不依赖本机或备用电脑转发；未批准来源继续拒绝。显式回环模式则只经 SSH 隧道可访问。
 - 观察多个完整 watch 周期，核对 VM 持续运行且没有新的 guard failure；再次 apply/服务重载后规则无重复。
 - 在隔离的 Linux 网络命名空间测试未知规则和规则错序仍被拒绝、维护阻断新旧业务会话，以及 guest 主动 IPv4、宿主访问、DNS/UDP 与 IPv6 的 DROP 计数。破坏性注入不要在用户正在使用的 VM 上做。
 - 区分本实例规则与共享 Docker/libvirt/其他 VM 规则；回退和销毁只移除本实例声明。
