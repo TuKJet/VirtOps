@@ -330,6 +330,30 @@ class PublishServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not assigned"):
                 publish._assert_host_ports(self.old, [])
 
+    def test_existing_proxy_does_not_block_new_port_but_still_blocks_migration(self):
+        network = self.old["network"]
+        network["published_services"] = json.loads(self.services.read_text())
+        existing = publish._policy(network)[0]
+        direct = {**existing, "access": "network", "publish_ip": network["publish_ip"],
+                  "allowed_sources": [network["client_cidr"]]}
+        added = {**direct, "id": "comsol-mcp", "publish_port": 18003, "guest_port": 8001}
+        addr = Mock(returncode=0, stdout=json.dumps([
+            {"addr_info": [{"family": "inet", "local": network["publish_ip"]}]},
+        ]))
+        sockets = Mock(returncode=0, stdout=f'LISTEN 0 128 {network["publish_ip"]}:18000 0.0.0.0:*\n')
+        with patch.object(publish.os, "name", "posix"), patch.object(publish.shutil, "which", side_effect=lambda name: name), \
+             patch.object(publish, "_policy", return_value=[existing]), \
+             patch.object(publish.subprocess, "run", side_effect=[addr, sockets] * 4):
+            publish._assert_host_ports(self.old, [existing, added], previous_network=network)
+            with self.assertRaisesRegex(RuntimeError, "already listening: 18000"):
+                publish._assert_host_ports(self.old, [direct], previous_network=network)
+            sockets.stdout += 'LISTEN 0 128 0.0.0.0:18003 0.0.0.0:*\n'
+            with self.assertRaisesRegex(RuntimeError, "already listening: 18003"):
+                publish._assert_host_ports(self.old, [existing, added], previous_network=network)
+            # Removing a different service must preserve this proxy too.
+            publish._policy.return_value = [existing, added]
+            publish._assert_host_ports(self.old, [existing], previous_network=network)
+
 
 if __name__ == "__main__":
     unittest.main()

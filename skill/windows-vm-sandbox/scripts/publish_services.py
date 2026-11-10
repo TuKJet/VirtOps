@@ -100,7 +100,8 @@ def _assert_no_active_transition(root: Path) -> None:
             raise RuntimeError(f"active maintenance transition: {path}")
 
 
-def _assert_host_ports(profile_data: dict[str, Any], services: list[dict[str, Any]]) -> None:
+def _assert_host_ports(profile_data: dict[str, Any], services: list[dict[str, Any]],
+                       *, previous_network: dict[str, Any] | None = None) -> None:
     if os.name != "posix":
         return
     net = profile_data["network"]
@@ -123,7 +124,10 @@ def _assert_host_ports(profile_data: dict[str, Any], services: list[dict[str, An
                                check=False, timeout=10)
     if listening.returncode:
         raise RuntimeError("unable to inspect listening TCP ports")
-    ports = {int(item["publish_port"]) for item in services}
+    previous = _policy(previous_network) if previous_network is not None else []
+    # An unchanged publication can already have a host proxy on its port.
+    # Still reject listeners on every new or modified publication.
+    ports = {int(item["publish_port"]) for item in services if item not in previous}
     for line in listening.stdout.splitlines():
         fields = line.split()
         if not fields:
@@ -180,7 +184,7 @@ def _prepare_services(profile_path: Path, services: list[dict[str, Any]]) -> dic
     root = Path(old["root"])
     _assert_no_active_transition(root)
     _assert_registry_candidate(desired)
-    _assert_host_ports(desired, _policy(desired["network"]))
+    _assert_host_ports(desired, _policy(desired["network"]), previous_network=old["network"])
     changes: dict[Path, bytes] = {}
     runtime_names = {
         Path("scripts/lib") / f"{old['name']}_network.py",
@@ -540,7 +544,8 @@ def apply_plan(plan: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError(f"unsupported VM state: {plan['evidence'].get('vm_state')}")
             _assert_no_active_transition(Path(plan["old"]["root"]))
             _assert_registry_candidate(plan["desired"])
-            _assert_host_ports(plan["desired"], _policy(plan["desired"]["network"]))
+            _assert_host_ports(plan["desired"], _policy(plan["desired"]["network"]),
+                               previous_network=plan["old"]["network"])
             domain_before = (upgrade.domain_facts(plan["old"], Path(plan["old"]["root"]))
                              if os.name == "posix" else None)
             _assert_auto_port_still_free(plan)
